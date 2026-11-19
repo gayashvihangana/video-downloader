@@ -1,3 +1,4 @@
+import hashlib
 import io
 import json
 import os
@@ -5,7 +6,9 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
+import urllib.error
 import urllib.request
 from tkinter import filedialog, messagebox
 
@@ -37,6 +40,11 @@ FONT = "Segoe UI"
 SETTINGS_FILE = os.path.join(os.path.expanduser("~"), ".video_downloader.json")
 
 APP_VERSION = "1.0.0"
+
+# Updates come from the latest release of this GitHub repo. The release must
+# have a "VideoDownloader-Setup-<version>.exe" file attached (build.ps1 makes it).
+GITHUB_REPO = "gayashvihangana/video-downloader"
+UPDATE_ASSET = re.compile(r"^VideoDownloader-Setup-[\w.-]+\.exe$", re.IGNORECASE)
 
 # -------------------------------
 # RUNNING AS AN .EXE (PyInstaller)
@@ -588,6 +596,90 @@ def post_details(meta):
     return {"site": site, "title": title, "uploader": uploader, "id": post_id}
 
 
+# -------------------------------
+# UPDATES (GitHub Releases)
+# -------------------------------
+
+
+def parse_version(text):
+    """ "v1.10.2" -> (1, 10, 2), so versions compare correctly."""
+
+    return tuple(int(number) for number in re.findall(r"\d+", text or "")[:3])
+
+
+def fetch_latest_release():
+    """Newest published release and its Setup.exe, or None if it has none."""
+
+    request = urllib.request.Request(
+        f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "VideoDownloader-updater",
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            data = json.load(response)
+    except urllib.error.HTTPError as error:
+        if error.code == 404:
+            return None  # no release published yet
+        raise
+
+    asset = next(
+        (a for a in data.get("assets") or [] if UPDATE_ASSET.match(a.get("name", ""))),
+        None,
+    )
+
+    if not asset:
+        return None
+
+    return {
+        "version": (data.get("tag_name") or "").lstrip("vV"),
+        "name": asset["name"],
+        "url": asset["browser_download_url"],
+        "size": asset.get("size") or 0,
+        # GitHub publishes a SHA-256 checksum for each release file
+        "digest": (asset.get("digest") or "").lower(),
+    }
+
+
+def download_update(release, on_progress):
+    """Download the new Setup.exe to the temp folder and check it's intact."""
+
+    target = os.path.join(tempfile.gettempdir(), safe_name(release["name"]))
+    partial = target + ".part"
+    checksum = hashlib.sha256()
+
+    request = urllib.request.Request(
+        release["url"], headers={"User-Agent": "VideoDownloader-updater"}
+    )
+
+    with urllib.request.urlopen(request, timeout=30) as response:
+        total = int(response.headers.get("Content-Length") or release["size"] or 0)
+        done = 0
+
+        with open(partial, "wb") as file:
+            while chunk := response.read(256 * 1024):
+                file.write(chunk)
+                checksum.update(chunk)
+                done += len(chunk)
+                on_progress(done, total)
+
+    expected = release["digest"].removeprefix("sha256:")
+    damaged = (total and done != total) or (
+        expected and checksum.hexdigest() != expected
+    )
+
+    if damaged:
+        os.remove(partial)
+        raise RuntimeError("The update was damaged while downloading. Try again.")
+
+    os.replace(partial, target)
+
+    return target
+
+
 def load_thumbnail(url, max_size=(132, 132)):
     """Download a thumbnail and shrink it to fit max_size (keeps proportions)."""
 
@@ -755,6 +847,7 @@ class VideoDownloader:
         main.pack(fill="both", expand=True, padx=28, pady=(22, 24))
 
         self.create_header(main)
+        self.create_update_banner(main)
         self.create_links_card(main)
         self.create_preview_card(main)
         self.create_options_card(main)
@@ -771,6 +864,7 @@ class VideoDownloader:
 
         header = ctk.CTkFrame(main, fg_color="transparent")
         header.pack(fill="x")
+        self.header = header
 
         ctk.CTkLabel(
             header,
@@ -793,6 +887,67 @@ class VideoDownloader:
         )
         self.theme_button.pack(side="right")
         self.update_theme_button()
+
+        # Shows the version; click to check for updates
+        self.version_button = ctk.CTkButton(
+            header,
+            text=f"v{APP_VERSION}",
+            width=0,
+            height=32,
+            corner_radius=8,
+            fg_color="transparent",
+            hover_color=FIELD,
+            text_color=MUTED,
+            font=self.fonts["small"],
+            command=lambda: self.check_for_updates(manual=True),
+        )
+        self.version_button.pack(side="right", padx=(0, 6))
+
+    def create_update_banner(self, main):
+
+        # Hidden until an update is found (or the user checks by hand)
+        self.update_banner = ctk.CTkFrame(
+            main,
+            fg_color=("#fdeced", "#2a1719"),
+            corner_radius=12,
+            border_width=1,
+            border_color=("#f6c4c6", "#4a2427"),
+        )
+
+        self.update_label = ctk.CTkLabel(
+            self.update_banner,
+            text="",
+            font=self.fonts["small"],
+            text_color=TEXT,
+            anchor="w",
+            justify="left",
+            wraplength=400,
+        )
+        self.update_label.pack(side="left", fill="x", expand=True, padx=14, pady=10)
+
+        self.later_button = self.ghost_button(
+            self.update_banner, "Later", self.hide_update_banner, width=64
+        )
+        self.later_button.pack(side="right", padx=(0, 10), pady=10)
+
+        self.update_button = ctk.CTkButton(
+            self.update_banner,
+            text="Update now",
+            command=self.start_update,
+            width=0,
+            height=32,
+            corner_radius=8,
+            fg_color=ACCENT,
+            hover_color=ACCENT_HOVER,
+            text_color="white",
+            font=self.fonts["label"],
+        )
+
+        self.update_release = None
+
+        # The installed app checks quietly a moment after it opens
+        if FROZEN:
+            self.root.after(2500, self.check_for_updates)
 
     def create_links_card(self, main):
 
@@ -1852,10 +2007,10 @@ class VideoDownloader:
 
         return done
 
-    def ui(self, function, *args):
+    def ui(self, function, *args, **kwargs):
         """Run a function on the main (Tk) thread."""
 
-        self.root.after(0, lambda: function(*args))
+        self.root.after(0, lambda: function(*args, **kwargs))
 
     # -------------------------------
     # PROGRESS
@@ -1940,6 +2095,136 @@ class VideoDownloader:
 
         if saved:
             self.open_folder_button.pack(side="right")
+
+    # -------------------------------
+    # UPDATES
+    # -------------------------------
+
+    def check_for_updates(self, manual=False):
+
+        if manual:
+            self.show_update_banner("Checking for updates…", can_update=False)
+
+        def work():
+            try:
+                release, error = fetch_latest_release(), None
+            except Exception as problem:
+                release, error = None, problem
+
+            self.ui(self.show_update_result, release, error, manual)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def show_update_result(self, release, error, manual):
+
+        newer = release and parse_version(release["version"]) > parse_version(
+            APP_VERSION
+        )
+
+        if newer:
+            self.update_release = release
+            size = human_size(release["size"])
+            self.show_update_banner(
+                f"Version {release['version']} is available "
+                f"(you have {APP_VERSION}).  {size}",
+                can_update=True,
+            )
+        elif not manual:
+            return  # quiet check: say nothing if there's no update
+        elif error:
+            self.show_update_banner(
+                "Couldn't check for updates. Are you online?", can_update=False
+            )
+        else:
+            self.show_update_banner(
+                f"You're up to date (version {APP_VERSION}).", can_update=False
+            )
+
+    def show_update_banner(self, text, can_update):
+
+        self.update_label.configure(text=text)
+        self.later_button.configure(text="Later" if can_update else "Close")
+        self.later_button.configure(state="normal")
+
+        if can_update:
+            self.update_button.configure(state="normal")
+            self.update_button.pack(side="right", padx=(0, 8), pady=10)
+        else:
+            self.update_button.pack_forget()
+
+        self.update_banner.pack(after=self.header, fill="x", pady=(14, 0))
+
+    def hide_update_banner(self):
+
+        self.update_banner.pack_forget()
+
+    def start_update(self):
+
+        release = self.update_release
+
+        if not release:
+            return
+
+        if self.is_downloading:
+            self.update_label.configure(
+                text="Finish or cancel the current download first, then update."
+            )
+            return
+
+        if not FROZEN:
+            self.update_label.configure(
+                text="Running from source: updates install only in the installed "
+                "app. Use git pull instead."
+            )
+            return
+
+        self.update_button.configure(state="disabled")
+        self.later_button.configure(state="disabled")
+        self.update_label.configure(text="Downloading update…")
+
+        def on_progress(done, total):
+            if total:
+                self.ui(
+                    self.update_label.configure,
+                    text=f"Downloading update…  {done / total:.0%}",
+                )
+
+        def work():
+            try:
+                installer = download_update(release, on_progress)
+            except Exception as error:
+                self.ui(self.update_failed, str(error))
+                return
+
+            self.ui(self.install_update, installer)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def update_failed(self, message):
+
+        self.update_label.configure(text=f"Update failed: {message}")
+        self.update_button.configure(state="normal")
+        self.later_button.configure(state="normal")
+
+    def install_update(self, installer):
+
+        self.update_label.configure(text="Installing… the app will reopen.")
+        self.root.update()
+
+        # Silent install over the current version; the installer reopens the
+        # app when it's done (see the [Run] section of installer.iss)
+        subprocess.Popen(
+            [
+                installer,
+                "/SILENT",
+                "/SUPPRESSMSGBOXES",
+                "/NORESTART",
+                "/CLOSEAPPLICATIONS",
+            ]
+        )
+
+        self.save_settings()
+        self.root.destroy()
 
     def close_application(self):
 
