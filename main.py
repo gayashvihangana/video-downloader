@@ -39,7 +39,7 @@ FONT = "Segoe UI"
 
 SETTINGS_FILE = os.path.join(os.path.expanduser("~"), ".video_downloader.json")
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 
 # Updates come from the latest release of this GitHub repo. The release must
 # have a "VideoDownloader-Setup-<version>.exe" file attached (build.ps1 makes it).
