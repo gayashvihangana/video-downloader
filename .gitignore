@@ -1,0 +1,13 @@
+# downloaded videos / photos
+downloads/
+
+# login cookies - never commit these
+cookies*.txt
+*.cookies
+
+# python / tools
+__pycache__/
+*.pyc
+.ruff_cache/
+.venv/
+venv/
