@@ -1,7 +1,10 @@
+import ctypes
 import hashlib
 import io
 import json
+import logging
 import os
+import queue
 import re
 import shutil
 import subprocess
@@ -10,6 +13,7 @@ import tempfile
 import threading
 import urllib.error
 import urllib.request
+from logging.handlers import RotatingFileHandler
 from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
@@ -84,6 +88,44 @@ use_bundled_tools()
 # -------------------------------
 
 VIDEO, AUDIO, PHOTOS = "Video", "Audio", "Photos"
+
+# Error-handling options (shown under "More options")
+RETRY_CHOICES = {"Don't retry": 0, "Retry 3 times": 3, "Retry 10 times": 10}
+DEFAULT_RETRY = "Retry 3 times"
+SKIP_FAILED, STOP_ON_ERROR = "Skip it, keep going", "Stop everything"
+
+# -------------------------------
+# ERROR LOG
+# -------------------------------
+
+# %LOCALAPPDATA%\VideoDownloader\error.log - full details for fixing bugs,
+# while the window only shows short, plain messages
+LOG_DIR = os.path.join(
+    os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "VideoDownloader"
+)
+LOG_FILE = os.path.join(LOG_DIR, "error.log")
+
+log = logging.getLogger("video_downloader")
+log.addHandler(logging.NullHandler())  # silent until setup_logging() runs
+log.propagate = False
+
+
+def setup_logging():
+    """Write warnings and errors to the log file (kept small: 3 x 500 KB)."""
+
+    try:
+        os.makedirs(LOG_DIR, exist_ok=True)
+        handler = RotatingFileHandler(
+            LOG_FILE, maxBytes=500_000, backupCount=2, encoding="utf-8"
+        )
+    except OSError:
+        return  # can't write a log: the app still works
+
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    log.addHandler(handler)
+    log.setLevel(logging.INFO)
+
+
 BEST_QUALITY = "Best available"
 NO_SIGN_IN = "No sign-in"
 COOKIES_FILE = "Cookies file…"
@@ -290,6 +332,67 @@ def is_photo_host(url):
     return any(host in url.lower() for host in PHOTO_HOSTS)
 
 
+LINK = re.compile(r"^(?:https?://|www\.)\S+$", re.IGNORECASE)
+
+
+def check_links(lines):
+    """Split pasted lines into usable links and problems.
+
+    Returns (links, problems). Duplicate links are dropped (kept once).
+    """
+
+    links, problems, seen = [], [], set()
+
+    for number, line in enumerate(lines, start=1):
+        if not LINK.match(line):
+            short = line if len(line) <= 40 else line[:40] + "…"
+            problems.append(f'Line {number} isn\'t a link: "{short}"')
+        elif line not in seen:
+            seen.add(line)
+            links.append(line)
+
+    return links, problems
+
+
+def check_folder(folder, needed_bytes=0):
+    """Why we can't save to `folder`, or None if it's fine."""
+
+    try:
+        os.makedirs(folder, exist_ok=True)
+    except OSError:
+        return "Can't create the save folder. Choose another one under Save to."
+
+    try:
+        with tempfile.TemporaryFile(dir=folder):
+            pass
+    except OSError:
+        return "Can't save in this folder (no permission). Choose another one."
+
+    if needed_bytes:
+        free = shutil.disk_usage(folder).free
+
+        # 5% extra: merging video + audio briefly needs a little more room
+        if free < needed_bytes * 1.05:
+            return (
+                f"Not enough disk space: this needs about {human_size(needed_bytes)}"
+                f" but only {human_size(free)} is free."
+            )
+
+    return None
+
+
+def retry_options(retries):
+    """yt-dlp settings for the "If a download fails" option."""
+
+    return {
+        "retries": retries,
+        "fragment_retries": retries,
+        "extractor_retries": min(retries, 3),
+        "file_access_retries": min(retries, 3),
+        "socket_timeout": 30,  # don't wait forever on a dead connection
+    }
+
+
 def friendly_error(error):
     """Turn yt-dlp / gallery-dl errors into short, plain advice."""
 
@@ -307,7 +410,7 @@ def friendly_error(error):
     if "private video" in lower:
         return (
             "This video is private. If the owner shared it with your account, "
-            "choose your browser or cookies file under Sign in."
+            "choose your browser or cookies file in ⚙ Settings → Sign in."
         )
 
     if "unsupported url" in lower:
@@ -333,8 +436,8 @@ def friendly_error(error):
         site = next(site for site in social if site in lower)
         site = SOCIAL_SITES[site]
         return (
-            f"{site} only shows this to signed-in users. Under Sign in, choose a "
-            f"browser or cookies file where you're signed in to {site}."
+            f"{site} only shows this to signed-in users. In ⚙ Settings → Sign in, "
+            f"choose a browser or cookies file where you're signed in to {site}."
         )
 
     if "unexpected response" in lower:
@@ -361,7 +464,8 @@ def friendly_error(error):
     if "netscape formatted" in lower:
         return 'That cookies file is JSON. Export it again in "Netscape" format.'
 
-    if "no such file" in lower or "errno 2" in lower:
+    # \b: "errno 2" must not match "errno 28" (disk full)
+    if "no such file" in lower or re.search(r"\berrno 2\b", lower):
         return "The cookies file can't be found. Choose it again."
 
     if "could not find" in lower and "cookies" in lower:
@@ -378,6 +482,31 @@ def friendly_error(error):
 
     if "no video" in lower or "no formats" in lower:
         return "There's no video in this post."
+
+    offline_words = (
+        "getaddrinfo",
+        "name resolution",
+        "failed to resolve",
+        "no address associated",
+        "network is unreachable",
+        "connection refused",
+        "connection reset",
+        "timed out",
+        "urlopen error",
+        "remote end closed",
+    )
+    if any(word in lower for word in offline_words):
+        return "Can't reach the site. Check your internet connection and try again."
+
+    if "no space left" in lower or "errno 28" in lower or "disk full" in lower:
+        return "Your disk is full. Free some space or choose another folder."
+
+    blocked_words = ("permission denied", "errno 13", "access is denied")
+    if any(word in lower for word in blocked_words):
+        return (
+            "Windows blocked saving the file (no permission, or the file is open "
+            "in another program). Close it or choose another folder."
+        )
 
     # Otherwise: drop "[site] <id>:" / "[site][error]" prefixes and help links
     message = re.sub(r"^(?:\[[^\]]+\])+\s*(?:[\w-]+:\s*)?", "", message)
@@ -476,6 +605,33 @@ def analyse_formats(info, need_audio_in_file):
     return sorted(by_label.values(), key=lambda q: q["height"], reverse=True)
 
 
+def summarize_video(info, need_audio_in_file):
+    """What the preview needs from yt-dlp's info about a link."""
+
+    # Posts with several items come back as a list: use the first video
+    entries = list(info.get("entries") or [])
+    video = info if info.get("formats") or not entries else entries[0]
+
+    site = info.get("extractor_key") or info.get("extractor") or ""
+    qualities = analyse_formats(video, need_audio_in_file)
+
+    return {
+        "site": {"Youtube": "YouTube", "TikTok": "TikTok"}.get(site, site),
+        "title": clean_title(info) or clean_title(video),
+        "uploader": (
+            video.get("uploader") or video.get("channel") or info.get("uploader") or ""
+        ),
+        "duration": video.get("duration") or 0,
+        "qualities": qualities,
+        "has_video": bool(qualities),
+        "has_audio": any(
+            f.get("acodec") not in (None, "none") for f in video.get("formats") or []
+        ),
+        "videos": len(entries) or (1 if qualities else 0),
+        "thumbnail_url": video.get("thumbnail") or info.get("thumbnail"),
+    }
+
+
 def quality_text(quality):
 
     size = human_size(quality["size"])
@@ -509,6 +665,28 @@ def run_gallery_dl(args, **popen_options):
         creationflags=NO_WINDOW,
         **popen_options,
     )
+
+
+def set_process_paused(process, paused):
+    """Freeze / unfreeze a running process (used to pause gallery-dl)."""
+
+    if not process or process.poll() is not None or sys.platform != "win32":
+        return
+
+    process_suspend_resume = 0x0800
+    kernel32, ntdll = ctypes.windll.kernel32, ctypes.windll.ntdll
+    handle = kernel32.OpenProcess(process_suspend_resume, False, process.pid)
+
+    if not handle:
+        return
+
+    try:
+        if paused:
+            ntdll.NtSuspendProcess(handle)
+        else:
+            ntdll.NtResumeProcess(handle)
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def gallery_error(output):
@@ -742,6 +920,23 @@ class VideoDownloader:
         self.cancel_requested = False
         self.photo_process = None
         self.current_item = (0, 0)  # (index, total)
+        self.last_fraction = 0
+
+        # Pause: the download thread waits while this event is cleared
+        self.paused = False
+        self.resume_event = threading.Event()
+        self.resume_event.set()
+
+        # Links that failed in the last run (for "Retry failed")
+        self.failed_links = []
+
+        # Work handed from background threads to the main thread (see ui())
+        self.ui_queue = queue.SimpleQueue()
+        self.root.after(50, self.process_ui_queue)
+
+        # Unexpected errors in button clicks etc.: log them and say so,
+        # instead of failing silently
+        self.root.report_callback_exception = self.on_unexpected_error
 
         self.fonts = {
             "title": ctk.CTkFont(FONT, 22, "bold"),
@@ -782,6 +977,8 @@ class VideoDownloader:
                 "sign_in": self.sign_in.get(),
                 "cookie_file": self.cookie_file,
                 "theme": ctk.get_appearance_mode().lower(),
+                "retry": self.retry_menu.get(),
+                "on_error": self.on_error_menu.get(),
             }
         )
 
@@ -848,14 +1045,24 @@ class VideoDownloader:
 
         self.create_header(main)
         self.create_update_banner(main)
-        self.create_links_card(main)
-        self.create_preview_card(main)
-        self.create_options_card(main)
-        self.create_action_area(main)
+
+        # Two pages in one window: the main screen and Settings (⚙)
+        pages = ctk.CTkFrame(main, fg_color="transparent")
+        pages.pack(fill="x")
+
+        self.home_page = ctk.CTkFrame(pages, fg_color="transparent")
+        self.home_page.pack(fill="x")
+        self.settings_page = self.create_settings_page(pages)
+
+        self.create_links_card(self.home_page)
+        self.create_preview_card(self.home_page)
+        self.create_options_card(self.home_page)
+        self.create_action_area(self.home_page)
 
         # Keyboard shortcuts
         self.root.bind("<Control-Return>", lambda event: self.on_main_button())
         self.root.bind("<Escape>", lambda event: self.cancel_download())
+        self.root.bind("<Control-p>", lambda event: self.toggle_pause())
         self.root.bind("<Control-l>", lambda event: self.url_box.focus_set())
 
         self.root.protocol("WM_DELETE_WINDOW", self.close_application)
@@ -887,6 +1094,20 @@ class VideoDownloader:
         )
         self.theme_button.pack(side="right")
         self.update_theme_button()
+
+        self.settings_button = ctk.CTkButton(
+            header,
+            text="⚙",
+            width=36,
+            height=32,
+            corner_radius=8,
+            fg_color=FIELD,
+            hover_color=FIELD_HOVER,
+            text_color=TEXT,
+            font=self.fonts["body"],
+            command=self.toggle_settings,
+        )
+        self.settings_button.pack(side="right", padx=(0, 6))
 
         # Shows the version; click to check for updates
         self.version_button = ctk.CTkButton(
@@ -1097,7 +1318,7 @@ class VideoDownloader:
 
         # Quality (or what will be saved, for audio/photos)
         self.field_label(card, "Quality").grid(
-            row=1, column=0, sticky="w", pady=(12, 0), **pad
+            row=1, column=0, sticky="w", pady=(12, 16), **pad
         )
         self.quality = ctk.CTkOptionMenu(
             card,
@@ -1113,19 +1334,77 @@ class VideoDownloader:
             text_color=TEXT,
             text_color_disabled=MUTED,
             dynamic_resizing=False,
+            command=self.on_quality_change,
         )
-        self.quality.grid(row=1, column=1, sticky="w", pady=(12, 0), padx=(0, 16))
+        self.quality.grid(row=1, column=1, sticky="w", pady=(12, 16), padx=(0, 16))
 
-        # Divider
-        ctk.CTkFrame(card, height=1, corner_radius=0, fg_color=BORDER).grid(
-            row=2, column=0, columnspan=2, sticky="ew", padx=16, pady=16
+        # Height the user picked; reused for the next link if it has it
+        self.preferred_height = None
+
+    def create_settings_page(self, parent):
+        """Less-used options live on their own page (opened with ⚙), so the
+        main screen stays short and simple."""
+
+        page = ctk.CTkFrame(parent, fg_color="transparent")
+
+        top = ctk.CTkFrame(page, fg_color="transparent")
+        top.pack(fill="x", pady=(16, 0))
+        self.ghost_button(top, "←  Back", self.show_home, width=84).pack(side="left")
+        ctk.CTkLabel(
+            top, text="Settings", font=self.fonts["heading"], text_color=TEXT
+        ).pack(side="left", padx=12)
+
+        def section(title):
+            ctk.CTkLabel(
+                page, text=title, font=self.fonts["label"], text_color=MUTED
+            ).pack(anchor="w", pady=(18, 6), padx=4)
+            card = self.card(page)
+            card.pack(fill="x")
+            card.grid_columnconfigure(1, weight=1)
+            return card
+
+        def option_menu(card, values, current, command, width=200):
+            menu = ctk.CTkOptionMenu(
+                card,
+                values=values,
+                command=command,
+                width=width,
+                height=34,
+                corner_radius=8,
+                font=self.fonts["small"],
+                dropdown_font=self.fonts["small"],
+                fg_color=FIELD,
+                button_color=FIELD,
+                button_hover_color=FIELD_HOVER,
+                text_color=TEXT,
+                dynamic_resizing=False,
+            )
+            menu.set(current)
+            return menu
+
+        def note(card, text, row):
+            label = ctk.CTkLabel(
+                card,
+                text=text,
+                font=self.fonts["small"],
+                text_color=MUTED,
+                anchor="w",
+                justify="left",
+                wraplength=440,
+            )
+            label.grid(row=row, column=1, sticky="ew", padx=(0, 16), pady=(4, 0))
+            return label
+
+        pad = {"padx": (16, 12)}
+
+        # --- Downloads ---
+        card = section("DOWNLOADS")
+
+        self.field_label(card, "Save to").grid(
+            row=0, column=0, sticky="w", pady=(16, 0), **pad
         )
-
-        # Save to
-        self.field_label(card, "Save to").grid(row=3, column=0, sticky="w", **pad)
-
         folder_row = ctk.CTkFrame(card, fg_color="transparent")
-        folder_row.grid(row=3, column=1, sticky="ew", padx=(0, 16))
+        folder_row.grid(row=0, column=1, sticky="ew", padx=(0, 16), pady=(16, 0))
 
         self.folder_label = ctk.CTkLabel(
             folder_row,
@@ -1135,54 +1414,107 @@ class VideoDownloader:
             anchor="w",
         )
         self.folder_label.pack(side="left")
-
         self.ghost_button(folder_row, "Change", self.choose_folder, width=70).pack(
             side="right"
         )
 
-        # Sign in
         self.field_label(card, "Sign in").grid(
-            row=4, column=0, sticky="w", pady=(10, 0), **pad
+            row=1, column=0, sticky="w", pady=(12, 0), **pad
         )
-        self.sign_in = ctk.CTkOptionMenu(
-            card,
-            values=BROWSERS,
-            command=self.on_sign_in_change,
-            width=170,
-            height=34,
-            corner_radius=8,
-            font=self.fonts["small"],
-            dropdown_font=self.fonts["small"],
-            fg_color=FIELD,
-            button_color=FIELD,
-            button_hover_color=FIELD_HOVER,
-            text_color=TEXT,
-            dynamic_resizing=False,
+        self.sign_in = option_menu(
+            card, BROWSERS, NO_SIGN_IN, self.on_sign_in_change, width=170
         )
-        self.sign_in.set(NO_SIGN_IN)
-        self.sign_in.grid(row=4, column=1, sticky="w", pady=(10, 0), padx=(0, 16))
+        self.sign_in.grid(row=1, column=1, sticky="w", padx=(0, 16), pady=(12, 0))
 
         hint = (
             "Only needed for private, age-restricted or login-only posts."
             if self.has_ffmpeg
             else "ffmpeg not found: MP3 is unavailable and video quality is limited."
         )
-        self.sign_in_note = ctk.CTkLabel(
-            card,
-            text=hint,
-            font=self.fonts["small"],
-            text_color=MUTED if self.has_ffmpeg else WARN,
-            anchor="w",
-            justify="left",
-            wraplength=480,
-        )
-        self.sign_in_note.grid(row=5, column=1, sticky="ew", pady=(6, 16), padx=(0, 16))
         self.default_note = (hint, MUTED if self.has_ffmpeg else WARN)
+        self.sign_in_note = note(card, hint, row=2)
+        self.sign_in_note.configure(text_color=self.default_note[1])
+        self.sign_in_note.grid_configure(pady=(4, 16))
+
+        # --- When something goes wrong ---
+        card = section("WHEN SOMETHING GOES WRONG")
+
+        retry = self.settings.get("retry", DEFAULT_RETRY)
+        self.field_label(card, "If it fails").grid(
+            row=0, column=0, sticky="w", pady=(16, 0), **pad
+        )
+        self.retry_menu = option_menu(
+            card,
+            list(RETRY_CHOICES),
+            retry if retry in RETRY_CHOICES else DEFAULT_RETRY,
+            lambda value: self.save_settings(),
+        )
+        self.retry_menu.grid(row=0, column=1, sticky="w", padx=(0, 16), pady=(16, 0))
+        note(card, "Retries help with slow or unstable internet.", row=1)
+
+        on_error = self.settings.get("on_error", SKIP_FAILED)
+        self.field_label(card, "Several links").grid(
+            row=2, column=0, sticky="w", pady=(12, 0), **pad
+        )
+        self.on_error_menu = option_menu(
+            card,
+            [SKIP_FAILED, STOP_ON_ERROR],
+            on_error if on_error in (SKIP_FAILED, STOP_ON_ERROR) else SKIP_FAILED,
+            lambda value: self.save_settings(),
+        )
+        self.on_error_menu.grid(row=2, column=1, sticky="w", padx=(0, 16), pady=(12, 0))
+        note(card, "When one link fails: skip it and download the rest, or stop.", 3)
+
+        self.field_label(card, "Error log").grid(
+            row=4, column=0, sticky="w", pady=(12, 16), **pad
+        )
+        self.ghost_button(card, "Open error log", self.open_log, width=120).grid(
+            row=4, column=1, sticky="w", padx=(0, 16), pady=(12, 16)
+        )
+
+        return page
+
+    def show_settings(self):
+
+        self.home_page.pack_forget()
+        self.settings_page.pack(fill="x")
+        self.settings_button.configure(fg_color=FIELD_HOVER)
+
+    def show_home(self):
+
+        self.settings_page.pack_forget()
+        self.home_page.pack(fill="x")
+        self.settings_button.configure(fg_color=FIELD)
+        self.save_settings()
+
+    def toggle_settings(self):
+
+        if self.settings_page.winfo_manager():
+            self.show_home()
+        else:
+            self.show_settings()
+
+    def retries(self):
+
+        return RETRY_CHOICES.get(self.retry_menu.get(), 3)
+
+    def open_log(self):
+
+        if os.path.isfile(LOG_FILE):
+            os.startfile(LOG_FILE)
+        else:
+            self.show_status(
+                "The error log is empty: nothing has gone wrong yet.", GOOD
+            )
 
     def create_action_area(self, main):
 
+        actions = ctk.CTkFrame(main, fg_color="transparent")
+        actions.pack(fill="x", pady=(16, 0))
+
+        # Download  ->  while downloading: Pause / Resume
         self.main_button = ctk.CTkButton(
-            main,
+            actions,
             text="Download",
             command=self.on_main_button,
             height=46,
@@ -1193,7 +1525,46 @@ class VideoDownloader:
             text_color="white",
             text_color_disabled=("#fbd5d6", "#8a3b3e"),
         )
-        self.main_button.pack(fill="x", pady=(16, 0))
+        self.main_button.pack(side="left", fill="x", expand=True)
+
+        # Only shown while downloading; smaller, so it's harder to hit by mistake
+        self.cancel_button = ctk.CTkButton(
+            actions,
+            text="Cancel",
+            command=self.cancel_download,
+            width=110,
+            height=46,
+            corner_radius=12,
+            font=self.fonts["body"],
+            fg_color=FIELD,
+            hover_color=FIELD_HOVER,
+            text_color=BAD,
+            text_color_disabled=FAINT,
+        )
+
+        # Where files go: matters for every download, so always visible
+        footer = ctk.CTkFrame(main, fg_color="transparent")
+        footer.pack(fill="x", pady=(6, 0))
+
+        self.footer_folder = ctk.CTkLabel(
+            footer,
+            text=f"Saving to  {self.short_path(self.download_folder)}",
+            font=self.fonts["small"],
+            text_color=MUTED,
+        )
+        self.footer_folder.pack(side="left")
+
+        ctk.CTkButton(
+            footer,
+            text="Change",
+            command=self.choose_folder,
+            width=0,
+            height=24,
+            fg_color="transparent",
+            hover_color=FIELD,
+            text_color=ACCENT,
+            font=self.fonts["label"],
+        ).pack(side="left", padx=4)
 
         # Progress / result (hidden until a download starts)
         self.status_area = ctk.CTkFrame(main, fg_color="transparent")
@@ -1226,6 +1597,11 @@ class VideoDownloader:
             row, "Open folder", self.open_folder, width=100
         )
 
+        # Shown after a run where some links failed
+        self.retry_button = self.ghost_button(
+            row, "Retry failed", self.retry_failed, width=100
+        )
+
         self.speed_label = ctk.CTkLabel(
             row, text="", font=self.fonts["small"], text_color=MUTED
         )
@@ -1252,7 +1628,9 @@ class VideoDownloader:
 
     def on_preview_resize(self, event):
 
-        width = max(event.width - 132 - 28 - 60, 200)
+        # Capped: otherwise a long title widens the card, which widens the
+        # wrap, which widens the window, and so on
+        width = min(max(event.width - 132 - 28 - 60, 200), 440)
 
         for label in (self.preview_title, self.preview_meta, self.preview_message):
             label.configure(wraplength=width)
@@ -1305,6 +1683,7 @@ class VideoDownloader:
         if folder:
             self.download_folder = folder
             self.folder_label.configure(text=self.short_path(folder))
+            self.footer_folder.configure(text=f"Saving to  {self.short_path(folder)}")
             self.save_settings()
 
     def open_folder(self):
@@ -1315,14 +1694,30 @@ class VideoDownloader:
     def update_main_button(self):
 
         if self.is_downloading:
-            self.main_button.configure(
-                text="Cancel  (Esc)",
-                state="normal",
-                fg_color=FIELD,
-                hover_color=FIELD_HOVER,
-                text_color=TEXT,
+            if self.paused:
+                self.main_button.configure(
+                    text="▶  Resume",
+                    state="normal",
+                    fg_color=ACCENT,
+                    hover_color=ACCENT_HOVER,
+                    text_color="white",
+                )
+            else:
+                self.main_button.configure(
+                    text="❚❚  Pause",
+                    state="normal",
+                    fg_color=FIELD,
+                    hover_color=FIELD_HOVER,
+                    text_color=TEXT,
+                )
+
+            self.cancel_button.configure(
+                state="disabled" if self.cancel_requested else "normal"
             )
+            self.cancel_button.pack(side="left", padx=(10, 0))
             return
+
+        self.cancel_button.pack_forget()
 
         urls = self.get_urls()
         mode = self.mode.get()
@@ -1393,6 +1788,7 @@ class VideoDownloader:
             # YouTube hides its video streams behind a JavaScript challenge.
             # yt-dlp solves it with a JS runtime: Deno if present, else Node.js.
             "js_runtimes": {"deno": {}, "node": {}},
+            **retry_options(self.retries()),
         }
 
         sign_in = self.sign_in.get()
@@ -1464,32 +1860,29 @@ class VideoDownloader:
             "error": None,
         }
 
+        try:
+            self.lookup_link(url, ydl_options, cookie_args, result)
+        except Exception:
+            # A bug in our own code: never leave the preview stuck on "Looking up"
+            log.exception("Lookup crashed for %s", url)
+            result["error"] = (
+                "Something went wrong while reading this link. Try again with ↻. "
+                "(Details were saved to the error log.)"
+            )
+
+        self.ui(self.show_lookup, result, request)
+
+    def lookup_link(self, url, ydl_options, cookie_args, result):
+
         # 1. Video / audio via yt-dlp
         try:
             with yt_dlp.YoutubeDL(ydl_options) as downloader:
                 info = downloader.extract_info(url, download=False)
 
-            # Posts with several items come back as a list: use the first video
-            entries = list(info.get("entries") or [])
-            video = info if info.get("formats") or not entries else entries[0]
-
-            site = info.get("extractor_key") or info.get("extractor") or ""
-            result["site"] = {"Youtube": "YouTube", "TikTok": "TikTok"}.get(site, site)
-            result["title"] = clean_title(info) or clean_title(video)
-            result["uploader"] = (
-                video.get("uploader") or video.get("channel") or info.get("uploader")
-            )
-            result["duration"] = video.get("duration") or 0
-            result["qualities"] = analyse_formats(video, not self.has_ffmpeg)
-            result["has_video"] = bool(result["qualities"])
-            result["has_audio"] = any(
-                f.get("acodec") not in (None, "none")
-                for f in video.get("formats") or []
-            )
-            result["videos"] = len(entries) or (1 if result["has_video"] else 0)
-            result["thumbnail_url"] = video.get("thumbnail") or info.get("thumbnail")
+            result.update(summarize_video(info, not self.has_ffmpeg))
 
         except Exception as error:
+            log.warning("yt-dlp lookup failed for %s: %s", url, error)
             result["error"] = friendly_error(error)
 
         # 2. Photos via gallery-dl (TikTok slideshows, Instagram, Facebook)
@@ -1511,6 +1904,7 @@ class VideoDownloader:
                     result["thumbnail_url"] = result["thumbnail_url"] or photos[0]
 
             except Exception as error:
+                log.warning("gallery-dl lookup failed for %s: %s", url, error)
                 # Only matters if yt-dlp found nothing either
                 if not (result["has_video"] or result["has_audio"]):
                     result["error"] = result["error"] or friendly_error(error)
@@ -1519,10 +1913,8 @@ class VideoDownloader:
         if result["thumbnail_url"] and not result["error"]:
             try:
                 result["thumbnail"] = load_thumbnail(result["thumbnail_url"])
-            except Exception:
-                pass  # no thumbnail is fine
-
-        self.root.after(0, lambda: self.show_lookup(result, request))
+            except Exception as error:
+                log.info("No thumbnail for %s: %s", url, error)  # that's fine
 
     def show_empty_preview(self):
 
@@ -1549,12 +1941,34 @@ class VideoDownloader:
         self.quality.configure(values=["Checking…"], state="disabled")
         self.quality.set("Checking…")
 
+        # If the site is very slow, say so (and offer ↻) instead of spinning
+        request = self.lookup_request
+        self.root.after(45_000, self.lookup_taking_long, request)
+
+    def lookup_taking_long(self, request):
+
+        if request == self.lookup_request and self.lookup is None:
+            self.preview_message.configure(
+                text="This is taking longer than usual. The site may be slow: "
+                "wait a bit more, or press ↻ to try again.",
+                text_color=WARN,
+            )
+            self.refresh_button.grid()
+
     def set_thumbnail(self, image, placeholder="▶"):
 
         if image is None:
             self.thumbnail.configure(
                 image=None, text=placeholder, width=132, height=84, fg_color=FIELD
             )
+
+            # BUG FIX: CustomTkinter's image=None doesn't clear the label inside,
+            # so it kept pointing at the old (deleted) picture and the next
+            # preview crashed: stuck on "Looking up…" after a second link.
+            inner_label = getattr(self.thumbnail, "_label", None)
+            if inner_label is not None:
+                inner_label.configure(image="")
+
             self.thumbnail_image = None
             return
 
@@ -1577,6 +1991,21 @@ class VideoDownloader:
 
         self.lookup = result
         self.refresh_button.grid()
+
+        try:
+            self.fill_preview(result)
+        except Exception:
+            # Never leave the preview half-drawn or stuck
+            log.exception("Showing the preview failed for %s", result.get("url"))
+            self.set_thumbnail(None, "!")
+            self.preview_title.configure(text="Couldn't show this link")
+            self.preview_message.configure(
+                text="Something went wrong. Press ↻ to try again. "
+                "(Details were saved to the error log.)",
+                text_color=BAD,
+            )
+
+    def fill_preview(self, result):
 
         if result["error"]:
             self.set_thumbnail(None, "!")
@@ -1637,6 +2066,10 @@ class VideoDownloader:
         self.update_quality_menu()
         self.update_main_button()
 
+    def on_quality_change(self, value):
+
+        self.preferred_height = self.qualities.get(value)
+
     def set_quality_choices(self, qualities):
 
         self.quality_list = qualities
@@ -1671,7 +2104,9 @@ class VideoDownloader:
             return
 
         # Keep the chosen height if this video has it too
-        previous_height = self.qualities.get(self.quality.get())
+        # BUG FIX: read the height the user picked, not the menu's current
+        # text (that's "Checking…" while a new link loads)
+        previous_height = self.preferred_height
 
         self.qualities = {quality_text(q): q["height"] for q in qualities}
         self.quality.configure(values=list(self.qualities), state="normal")
@@ -1784,7 +2219,7 @@ class VideoDownloader:
             if request == self.sign_in_request:
                 self.show_note(text, color)
 
-        self.root.after(0, show)
+        self.ui(show)
 
     # -------------------------------
     # DOWNLOAD
@@ -1793,9 +2228,48 @@ class VideoDownloader:
     def on_main_button(self):
 
         if self.is_downloading:
-            self.cancel_download()
+            self.toggle_pause()
         else:
             self.start_download()
+
+    # -------------------------------
+    # PAUSE / RESUME
+    # -------------------------------
+
+    def toggle_pause(self):
+
+        if not self.is_downloading or self.cancel_requested:
+            return
+
+        self.paused = not self.paused
+
+        if self.paused:
+            self.resume_event.clear()  # the download thread waits at its next step
+            set_process_paused(self.photo_process, True)
+
+            self.progress.configure(progress_color=FAINT)
+            self.speed_label.configure(text="")
+            self.show_status(
+                f"{self.item_prefix()}Paused at {self.last_fraction:.0%}", MUTED
+            )
+        else:
+            set_process_paused(self.photo_process, False)
+            self.resume_event.set()
+
+            self.progress.configure(progress_color=ACCENT)
+            self.show_status(f"{self.item_prefix()}Resuming…", MUTED)
+
+        self.update_main_button()
+
+    def wait_while_paused(self):
+        """Called from the download thread: block here while paused."""
+
+        while not self.resume_event.wait(0.2):
+            if self.cancel_requested:
+                break
+
+        if self.cancel_requested:
+            raise DownloadCancelled()
 
     def get_download_options(self):
 
@@ -1858,12 +2332,57 @@ class VideoDownloader:
 
         return options
 
-    def start_download(self):
+    def needed_space(self, urls):
+        """Estimated bytes for this download (only known for a single link)."""
+
+        lookup = self.lookup or {}
+
+        if len(urls) != 1 or lookup.get("url") != urls[0]:
+            return 0
+
+        if self.mode.get() == AUDIO:
+            return int((lookup.get("duration") or 0) * MP3_KBPS * 1000 / 8)
+
+        if self.mode.get() == VIDEO:
+            height = self.qualities.get(self.quality.get())
+            sizes = [q["size"] for q in lookup.get("qualities") or []]
+            chosen = [
+                q["size"]
+                for q in lookup.get("qualities") or []
+                if q["height"] == height
+            ]
+            return (chosen or sizes or [0])[0]
+
+        return 0
+
+    def preflight(self, urls):
+        """Problems to fix before downloading (empty list = good to go)."""
+
+        links, problems = check_links(urls)
+
+        if self.mode.get() == AUDIO and not self.has_ffmpeg:
+            problems.append(
+                "MP3 needs ffmpeg, which wasn't found. Install it "
+                "(winget install Gyan.FFmpeg) and restart the app."
+            )
+
+        folder_problem = check_folder(self.download_folder, self.needed_space(links))
+        if folder_problem:
+            problems.append(folder_problem)
+
+        return links, problems
+
+    def retry_failed(self):
+
+        if self.failed_links and not self.is_downloading:
+            self.start_download(self.failed_links)
+
+    def start_download(self, links=None):
 
         if self.is_downloading:
             return
 
-        urls = self.get_urls()
+        urls = links or self.get_urls()
 
         if not urls:
             self.url_box.focus_set()
@@ -1871,30 +2390,46 @@ class VideoDownloader:
 
         mode = self.mode.get()
 
-        if mode == AUDIO and not self.has_ffmpeg:
-            self.show_status(
-                "MP3 needs ffmpeg, which wasn't found. Install it "
-                "(winget install Gyan.FFmpeg) and restart the app.",
-                BAD,
-            )
+        # Catch problems now, not halfway through (wrong lines, folder, space)
+        urls, problems = self.preflight(urls)
+
+        if problems:
+            self.retry_button.pack_forget()
+            self.open_folder_button.pack_forget()
+            self.progress.set(0)
+            self.show_status("\n".join(f"•  {p}" for p in problems), BAD)
             return
 
+        self.failed_links = []
+        self.retry_button.pack_forget()
         self.is_downloading = True
         self.cancel_requested = False
+        self.paused = False
+        self.resume_event.set()
+        self.last_fraction = 0
 
         self.update_main_button()
         self.status_area.pack(fill="x", pady=(14, 0))
         self.open_folder_button.pack_forget()
+        self.progress.configure(progress_color=ACCENT)
         self.progress.set(0)
         self.show_status("Starting…", MUTED)
 
         # Read widget values here: Tk must only be touched from the main thread
         if mode == PHOTOS:
-            job, options = self.download_all_photos, self.gallery_cookie_args()
+            job, options = self.download_photo_link, self.gallery_cookie_args()
+            kind = "photo"
         else:
-            job, options = self.download_all_videos, self.get_download_options()
+            job, options = self.download_video_link, self.get_download_options()
+            kind = "file"
 
-        threading.Thread(target=job, args=(urls, options), daemon=True).start()
+        stop_on_error = self.on_error_menu.get() == STOP_ON_ERROR
+
+        threading.Thread(
+            target=self.download_all,
+            args=(urls, job, options, kind, stop_on_error),
+            daemon=True,
+        ).start()
 
     def cancel_download(self):
 
@@ -1903,53 +2438,65 @@ class VideoDownloader:
 
         self.cancel_requested = True
         self.show_status("Cancelling…", MUTED)
+        self.update_main_button()
+
+        # Wake a paused download so it can stop
+        self.resume_event.set()
 
         if self.photo_process and self.photo_process.poll() is None:
+            set_process_paused(self.photo_process, False)
             self.photo_process.terminate()
 
-    def download_all_videos(self, urls, options):
+    def download_all(self, urls, job, options, kind, stop_on_error):
+        """Download each link in turn (runs on a background thread)."""
 
-        saved, errors = 0, []
+        saved, failed = 0, []  # failed: [(link, reason)]
 
-        for index, url in enumerate(urls):
-            if self.cancel_requested:
-                break
-
-            self.current_item = (index + 1, len(urls))
-
-            try:
-                with yt_dlp.YoutubeDL(options) as downloader:
-                    # Clean social-media titles before the file is named
-                    downloader.add_post_processor(CleanTitle(), when="pre_process")
-                    downloader.download([url])
-
-                saved += 1
-
-            except Exception as error:
+        try:
+            for index, url in enumerate(urls):
                 if self.cancel_requested:
                     break
-                errors.append(friendly_error(error))
 
-        self.root.after(0, lambda: self.download_finished(saved, errors, "file"))
+                self.current_item = (index + 1, len(urls))
 
-    def download_all_photos(self, urls, cookie_args):
+                try:
+                    saved += job(url, options)
 
-        saved, errors = 0, []
+                except Exception as error:
+                    if self.cancel_requested:
+                        break
 
-        for index, url in enumerate(urls):
-            if self.cancel_requested:
-                break
+                    log.warning("Download failed for %s: %s", url, error)
+                    failed.append((url, friendly_error(error)))
 
-            self.current_item = (index + 1, len(urls))
+                    if stop_on_error:
+                        # The rest weren't tried: offer them in "Retry" too
+                        for skipped in urls[index + 1 :]:
+                            failed.append(
+                                (skipped, "Not downloaded: stopped after an error.")
+                            )
+                        break
 
-            try:
-                saved += self.download_photos(url, cookie_args)
-            except Exception as error:
-                if self.cancel_requested:
-                    break
-                errors.append(friendly_error(error))
+        except Exception:
+            # Our own bug: report it instead of leaving the app "downloading"
+            log.exception("Download loop crashed")
+            failed.append(("", "Something went wrong. Details were saved to the log."))
 
-        self.root.after(0, lambda: self.download_finished(saved, errors, "photo"))
+        finally:
+            self.ui(self.download_finished, saved, failed, kind)
+
+    def download_video_link(self, url, options):
+
+        with yt_dlp.YoutubeDL(options) as downloader:
+            # Clean social-media titles before the file is named
+            downloader.add_post_processor(CleanTitle(), when="pre_process")
+            downloader.download([url])
+
+        return 1
+
+    def download_photo_link(self, url, cookie_args):
+
+        return self.download_photos(url, cookie_args)
 
     def download_photos(self, url, cookie_args):
 
@@ -2008,9 +2555,27 @@ class VideoDownloader:
         return done
 
     def ui(self, function, *args, **kwargs):
-        """Run a function on the main (Tk) thread."""
+        """Run a function on the main (Tk) thread. Safe to call from any thread.
 
-        self.root.after(0, lambda: function(*args, **kwargs))
+        Background threads must not touch Tk directly, so they leave the work
+        in a queue that the main thread empties every 50 ms.
+        """
+
+        self.ui_queue.put((function, args, kwargs))
+
+    def process_ui_queue(self):
+
+        try:
+            while True:
+                function, args, kwargs = self.ui_queue.get_nowait()
+                try:
+                    function(*args, **kwargs)
+                except Exception:
+                    log.exception("UI update failed")
+        except queue.Empty:
+            pass
+
+        self.root.after(50, self.process_ui_queue)
 
     # -------------------------------
     # PROGRESS
@@ -2022,6 +2587,11 @@ class VideoDownloader:
         return f"{index} of {total}  ·  " if total > 1 else ""
 
     def progress_hook(self, data):
+
+        # yt-dlp calls this between chunks: waiting here pauses the download.
+        # If the site drops the connection meanwhile, yt-dlp resumes from the
+        # bytes it already has.
+        self.wait_while_paused()
 
         if self.cancel_requested:
             raise DownloadCancelled()
@@ -2051,9 +2621,11 @@ class VideoDownloader:
 
     def update_progress(self, fraction, text, details):
 
-        if not self.is_downloading or self.cancel_requested:
+        # Updates already queued when Pause was pressed shouldn't undo "Paused"
+        if not self.is_downloading or self.cancel_requested or self.paused:
             return
 
+        self.last_fraction = fraction
         self.progress.set(fraction)
         self.show_status(text, MUTED)
         self.speed_label.configure(text=details)
@@ -2069,13 +2641,29 @@ class VideoDownloader:
         self.status_area.pack(fill="x", pady=(14, 0))
         self.status_label.configure(text=text, text_color=color)
 
-    def download_finished(self, saved, errors, kind):
+    def on_unexpected_error(self, exc_type, exc_value, exc_traceback):
+        """Tk calls this when a button/callback crashes."""
+
+        log.error("Unexpected error", exc_info=(exc_type, exc_value, exc_traceback))
+        self.show_status(
+            "Something went wrong. Try again; if it keeps happening, open "
+            "⚙ Settings → Error log.",
+            BAD,
+        )
+
+    def download_finished(self, saved, failed, kind):
+
+        errors = [reason for _, reason in failed]
+        self.failed_links = [link for link, _ in failed if link]
 
         cancelled = self.cancel_requested
 
         self.is_downloading = False
         self.cancel_requested = False
+        self.paused = False
+        self.resume_event.set()
         self.photo_process = None
+        self.progress.configure(progress_color=ACCENT)
         self.update_main_button()
         self.speed_label.configure(text="")
 
@@ -2092,6 +2680,13 @@ class VideoDownloader:
         else:
             self.progress.set(1)
             self.show_status(f"✓  Done. {files} saved.", GOOD)
+
+        if self.failed_links and not cancelled:
+            count = len(self.failed_links)
+            self.retry_button.configure(
+                text="Retry failed" if count == 1 else f"Retry {count} failed"
+            )
+            self.retry_button.pack(side="right", padx=(8, 0))
 
         if saved:
             self.open_folder_button.pack(side="right")
@@ -2268,6 +2863,14 @@ def set_window_icon(root):
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--gallery-dl":
         run_gallery_dl_cli()
+
+    setup_logging()
+    log.info("Video Downloader %s started", APP_VERSION)
+
+    # Crashes in background threads go to the log too
+    threading.excepthook = lambda args: log.error(
+        "Background thread crashed", exc_info=args.exc_value or True
+    )
 
     settings = VideoDownloader.load_settings()
     ctk.set_appearance_mode(settings.get("theme", "system"))

@@ -10,3 +10,9 @@ select = ["E", "W", "F", "I", "B", "UP"]
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "live: uses the real internet (skipped unless RUN_LIVE=1)",
+]
