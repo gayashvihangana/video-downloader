@@ -5,6 +5,12 @@ downloads/
 cookies*.txt
 *.cookies
 
+# build output (attach release\*.exe to a GitHub Release instead)
+dist/
+release/
+build/pyinstaller/
+tools/
+
 # python / tools
 __pycache__/
 *.pyc

@@ -36,6 +36,41 @@ FONT = "Segoe UI"
 
 SETTINGS_FILE = os.path.join(os.path.expanduser("~"), ".video_downloader.json")
 
+APP_VERSION = "1.0.0"
+
+# -------------------------------
+# RUNNING AS AN .EXE (PyInstaller)
+# -------------------------------
+
+FROZEN = getattr(sys, "frozen", False)
+
+# Folder of the .exe (installed app) or of this file (running from source)
+APP_DIR = (
+    os.path.dirname(sys.executable)
+    if FROZEN
+    else os.path.dirname(os.path.abspath(__file__))
+)
+
+# Bundled read-only files (icon); PyInstaller unpacks them to sys._MEIPASS
+RESOURCE_DIR = getattr(sys, "_MEIPASS", APP_DIR)
+ICON_FILE = os.path.join(RESOURCE_DIR, "assets", "icon.ico")
+
+
+def use_bundled_tools():
+    """Put the bundled ffmpeg and Deno (tools\\...) first on PATH.
+
+    The installer ships them, so the app works on PCs that have neither.
+    """
+
+    for tool in ("ffmpeg", "deno"):
+        folder = os.path.join(APP_DIR, "tools", tool)
+
+        if os.path.isdir(folder):
+            os.environ["PATH"] = folder + os.pathsep + os.environ.get("PATH", "")
+
+
+use_bundled_tools()
+
 # -------------------------------
 # OPTIONS
 # -------------------------------
@@ -451,7 +486,13 @@ def quality_text(quality):
 def run_gallery_dl(args, **popen_options):
 
     env = dict(os.environ, PYTHONIOENCODING="utf-8")
-    command = [sys.executable, "-m", "gallery_dl", *args]
+
+    # As an .exe there is no separate Python: the app runs gallery-dl itself
+    # when started with --gallery-dl (see the bottom of this file)
+    if FROZEN:
+        command = [sys.executable, "--gallery-dl", *args]
+    else:
+        command = [sys.executable, "-m", "gallery_dl", *args]
 
     return command, dict(
         env=env,
@@ -570,15 +611,22 @@ def load_thumbnail(url, max_size=(132, 132)):
 class VideoDownloader:
     def __init__(self, root):
         self.root = root
-        self.root.title("Video Downloader")
+        self.root.title(f"Video Downloader {APP_VERSION}")
         self.root.configure(fg_color=BG)
 
         self.settings = self.load_settings()
 
+        # Installed app: save to Downloads\Video Downloader (the install folder
+        # isn't a good place for files). From source: the project's downloads.
+        if FROZEN:
+            default_folder = os.path.join(
+                os.path.expanduser("~"), "Downloads", "Video Downloader"
+            )
+        else:
+            default_folder = os.path.join(APP_DIR, "downloads")
+
         folder = self.settings.get("folder") or ""
-        self.download_folder = (
-            folder if os.path.isdir(folder) else os.path.join(os.getcwd(), "downloads")
-        )
+        self.download_folder = folder if os.path.isdir(folder) else default_folder
         os.makedirs(self.download_folder, exist_ok=True)
 
         # ffmpeg is needed to merge video+audio streams and to convert to MP3
@@ -1911,10 +1959,39 @@ class VideoDownloader:
 # MAIN PROGRAM
 # -------------------------------
 
+
+def run_gallery_dl_cli():
+    """VideoDownloader.exe --gallery-dl <args>: behave like the gallery-dl tool."""
+
+    import gallery_dl
+
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure:
+            reconfigure(encoding="utf-8", errors="replace")
+
+    sys.argv = ["gallery-dl", *sys.argv[2:]]
+    sys.exit(gallery_dl.main())
+
+
+def set_window_icon(root):
+
+    if os.path.isfile(ICON_FILE):
+        root.iconbitmap(ICON_FILE)
+
+
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--gallery-dl":
+        run_gallery_dl_cli()
+
     settings = VideoDownloader.load_settings()
     ctk.set_appearance_mode(settings.get("theme", "system"))
 
     root = ctk.CTk()
+    root.title(f"Video Downloader {APP_VERSION}")
+
+    # CustomTkinter sets its own icon shortly after start, so set ours after it
+    root.after(300, set_window_icon, root)
+
     app = VideoDownloader(root)
     root.mainloop()
