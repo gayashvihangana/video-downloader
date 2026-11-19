@@ -146,6 +146,33 @@ SITE_LOGIN_COOKIES = {
 }
 SITE_NAMES = ", ".join(SITE_LOGIN_COOKIES)
 
+# Where each browser keeps its profile: used to offer only installed browsers
+BROWSER_PROFILES = {
+    "Firefox": ("APPDATA", "Mozilla", "Firefox", "Profiles"),
+    "Chrome": ("LOCALAPPDATA", "Google", "Chrome", "User Data"),
+    "Edge": ("LOCALAPPDATA", "Microsoft", "Edge", "User Data"),
+    "Brave": ("LOCALAPPDATA", "BraveSoftware", "Brave-Browser", "User Data"),
+}
+
+# Words in an error that mean "this needs an account"
+SIGN_IN_WORDS = (
+    "private video",
+    "sign in to confirm",
+    "not a bot",
+    "login required",
+    "login_required",
+    "log in",
+    "logged-in",
+    "use --cookies",
+    "cookies-from-browser",
+    "401",
+    "unauthorized",
+    "members-only",
+    "join this channel",
+    "age-restricted",
+    "empty media response",
+)
+
 # Format filter that rejects watermarked versions (TikTok marks them in
 # format_note). The "?" keeps formats that have no format_note at all.
 NO_WATERMARK = "[format_note!*=?watermark]"
@@ -332,6 +359,61 @@ def is_photo_host(url):
     return any(host in url.lower() for host in PHOTO_HOSTS)
 
 
+def installed_browsers():
+    """Browsers that have a profile on this PC (so they can have a login)."""
+
+    found = []
+
+    for name, (variable, *parts) in BROWSER_PROFILES.items():
+        base = os.environ.get(variable)
+        if base and os.path.isdir(os.path.join(base, *parts)):
+            found.append(name)
+
+    return found
+
+
+def needs_sign_in(error):
+    """True if this error means the post/video needs a logged-in account."""
+
+    lower = str(error).lower()
+    return any(word in lower for word in SIGN_IN_WORDS)
+
+
+def site_of(url):
+    """ "https://www.instagram.com/p/x" -> "Instagram" (None if unknown)."""
+
+    lower = (url or "").lower()
+
+    for site, (domain, _) in SITE_LOGIN_COOKIES.items():
+        if domain in lower or (site == "YouTube" and "youtu.be" in lower):
+            return site
+
+    if "fb.watch" in lower:
+        return "Facebook"
+
+    return None
+
+
+def read_logins(method, cookie_file=None):
+    """Sites the browser / cookies file is signed in to (reads this PC only)."""
+
+    from yt_dlp.cookies import YoutubeDLCookieJar, extract_cookies_from_browser
+
+    if method == COOKIES_FILE:
+        jar = YoutubeDLCookieJar(cookie_file)
+        jar.load()
+    else:
+        jar = extract_cookies_from_browser(method.lower(), logger=QuietLogger())
+
+    cookies = [cookie for cookie in jar if not cookie.is_expired()]
+
+    return [
+        site
+        for site, (domain, names) in SITE_LOGIN_COOKIES.items()
+        if any(c.domain.endswith(domain) and c.name in names for c in cookies)
+    ]
+
+
 LINK = re.compile(r"^(?:https?://|www\.)\S+$", re.IGNORECASE)
 
 
@@ -410,7 +492,7 @@ def friendly_error(error):
     if "private video" in lower:
         return (
             "This video is private. If the owner shared it with your account, "
-            "choose your browser or cookies file in ⚙ Settings → Sign in."
+            "sign in to download it."
         )
 
     if "unsupported url" in lower:
@@ -436,8 +518,8 @@ def friendly_error(error):
         site = next(site for site in social if site in lower)
         site = SOCIAL_SITES[site]
         return (
-            f"{site} only shows this to signed-in users. In ⚙ Settings → Sign in, "
-            f"choose a browser or cookies file where you're signed in to {site}."
+            f"{site} only shows this to signed-in users. Sign in with the browser "
+            f"where you use {site}."
         )
 
     if "unexpected response" in lower:
@@ -912,7 +994,7 @@ class VideoDownloader:
 
         # Sign-in
         self.cookie_file = self.settings.get("cookie_file")
-        self.previous_sign_in = NO_SIGN_IN
+        self.sign_in_method = NO_SIGN_IN  # a browser name, COOKIES_FILE or none
         self.sign_in_request = 0
 
         # Download state
@@ -974,7 +1056,7 @@ class VideoDownloader:
         self.settings.update(
             {
                 "folder": self.download_folder,
-                "sign_in": self.sign_in.get(),
+                "sign_in": self.sign_in_method,
                 "cookie_file": self.cookie_file,
                 "theme": ctk.get_appearance_mode().lower(),
                 "retry": self.retry_menu.get(),
@@ -997,9 +1079,9 @@ class VideoDownloader:
         ):
             sign_in = NO_SIGN_IN
 
-        if sign_in in BROWSERS and sign_in != NO_SIGN_IN:
-            self.sign_in.set(sign_in)
-            self.apply_sign_in(sign_in, ask_for_file=False)
+        if sign_in in BROWSERS:
+            self.sign_in_method = sign_in
+            self.update_sign_in_chip()
 
     # -------------------------------
     # INTERFACE
@@ -1243,7 +1325,7 @@ class VideoDownloader:
             text_color=TEXT,
             anchor="w",
             justify="left",
-            wraplength=420,
+            wraplength=360,  # safe start; on_preview_resize adjusts
         )
         self.preview_title.grid(row=0, column=1, sticky="ew", pady=(14, 0))
 
@@ -1254,7 +1336,7 @@ class VideoDownloader:
             text_color=MUTED,
             anchor="w",
             justify="left",
-            wraplength=420,
+            wraplength=360,  # safe start; on_preview_resize adjusts
         )
         self.preview_meta.grid(row=1, column=1, sticky="ew", pady=(2, 0))
 
@@ -1274,7 +1356,7 @@ class VideoDownloader:
             text_color=BAD,
             anchor="w",
             justify="left",
-            wraplength=420,
+            wraplength=360,  # safe start; on_preview_resize adjusts
         )
         self.preview_message.grid(row=3, column=1, sticky="new", pady=(2, 14))
 
@@ -1286,6 +1368,8 @@ class VideoDownloader:
 
         # Keep text wrapped to the space next to the thumbnail
         card.bind("<Configure>", self.on_preview_resize)
+
+        self.create_sign_in_panel(card)
 
     def create_options_card(self, main):
 
@@ -1418,23 +1502,18 @@ class VideoDownloader:
             side="right"
         )
 
-        self.field_label(card, "Sign in").grid(
-            row=1, column=0, sticky="w", pady=(12, 0), **pad
-        )
-        self.sign_in = option_menu(
-            card, BROWSERS, NO_SIGN_IN, self.on_sign_in_change, width=170
-        )
-        self.sign_in.grid(row=1, column=1, sticky="w", padx=(0, 16), pady=(12, 0))
-
-        hint = (
-            "Only needed for private, age-restricted or login-only posts."
-            if self.has_ffmpeg
-            else "ffmpeg not found: MP3 is unavailable and video quality is limited."
-        )
-        self.default_note = (hint, MUTED if self.has_ffmpeg else WARN)
-        self.sign_in_note = note(card, hint, row=2)
-        self.sign_in_note.configure(text_color=self.default_note[1])
-        self.sign_in_note.grid_configure(pady=(4, 16))
+        # Sign-in isn't here on purpose: it's offered right where it's needed
+        # (on a link that needs an account), and signing out is on the chip.
+        if self.has_ffmpeg:
+            folder_row.grid_configure(pady=16)
+        else:
+            warning = note(
+                card,
+                "ffmpeg not found: MP3 is unavailable and video quality is limited.",
+                row=1,
+            )
+            warning.configure(text_color=WARN)
+            warning.grid_configure(pady=(4, 16))
 
         # --- When something goes wrong ---
         card = section("WHEN SOMETHING GOES WRONG")
@@ -1554,6 +1633,20 @@ class VideoDownloader:
         )
         self.footer_folder.pack(side="left")
 
+        # "🔒 Firefox ✕": shows you're signed in; click to sign out
+        self.sign_in_chip = ctk.CTkButton(
+            footer,
+            text="",
+            command=self.sign_out,
+            width=0,
+            height=26,
+            corner_radius=13,
+            fg_color=FIELD,
+            hover_color=FIELD_HOVER,
+            text_color=TEXT,
+            font=self.fonts["small"],
+        )
+
         ctk.CTkButton(
             footer,
             text="Change",
@@ -1628,9 +1721,14 @@ class VideoDownloader:
 
     def on_preview_resize(self, event):
 
+        # event.width is in screen pixels, but CustomTkinter scales wraplength
+        # by the Windows display scaling (e.g. 125%), so convert first
+        scale = ctk.ScalingTracker.get_widget_scaling(self.preview_title)
+        card_width = event.width / scale
+
         # Capped: otherwise a long title widens the card, which widens the
         # wrap, which widens the window, and so on
-        width = min(max(event.width - 132 - 28 - 60, 200), 440)
+        width = min(max(card_width - 132 - 28 - 60, 200), 440)
 
         for label in (self.preview_title, self.preview_meta, self.preview_message):
             label.configure(wraplength=width)
@@ -1646,10 +1744,6 @@ class VideoDownloader:
 
         dark = ctk.get_appearance_mode().lower() == "dark"
         self.theme_button.configure(text="☀" if dark else "☾")
-
-    def show_note(self, text, color):
-
-        self.sign_in_note.configure(text=text, text_color=color)
 
     def get_urls(self):
 
@@ -1791,7 +1885,7 @@ class VideoDownloader:
             **retry_options(self.retries()),
         }
 
-        sign_in = self.sign_in.get()
+        sign_in = self.sign_in_method
 
         if sign_in == COOKIES_FILE and self.cookie_file:
             options["cookiefile"] = self.cookie_file
@@ -1802,7 +1896,7 @@ class VideoDownloader:
 
     def gallery_cookie_args(self):
 
-        sign_in = self.sign_in.get()
+        sign_in = self.sign_in_method
 
         if sign_in == COOKIES_FILE and self.cookie_file:
             return ["--cookies", self.cookie_file]
@@ -1858,6 +1952,7 @@ class VideoDownloader:
             "thumbnail_url": None,
             "thumbnail": None,
             "error": None,
+            "needs_sign_in": False,
         }
 
         try:
@@ -1884,6 +1979,7 @@ class VideoDownloader:
         except Exception as error:
             log.warning("yt-dlp lookup failed for %s: %s", url, error)
             result["error"] = friendly_error(error)
+            result["needs_sign_in"] = needs_sign_in(error)
 
         # 2. Photos via gallery-dl (TikTok slideshows, Instagram, Facebook)
         if is_photo_host(url):
@@ -1896,6 +1992,7 @@ class VideoDownloader:
 
                 if photos:
                     result["error"] = None
+                    result["needs_sign_in"] = False
                     result["title"] = result["title"] or details.get("title", "")
                     result["site"] = result["site"] or details.get("site", "")
                     result["uploader"] = result["uploader"] or details.get(
@@ -1908,6 +2005,9 @@ class VideoDownloader:
                 # Only matters if yt-dlp found nothing either
                 if not (result["has_video"] or result["has_audio"]):
                     result["error"] = result["error"] or friendly_error(error)
+                    result["needs_sign_in"] = result["needs_sign_in"] or needs_sign_in(
+                        error
+                    )
 
         # 3. Thumbnail picture
         if result["thumbnail_url"] and not result["error"]:
@@ -1927,10 +2027,16 @@ class VideoDownloader:
         self.preview_badges.configure(text="")
         self.preview_message.configure(text="")
         self.refresh_button.grid_remove()
+        self.hide_sign_in_panel()
         self.set_modes([VIDEO, AUDIO])
         self.set_quality_choices([])
 
     def show_loading_preview(self):
+
+        # Keep the sign-in panel while retrying after a sign-in, so its
+        # "Trying again…" message stays visible; otherwise hide it
+        if self.sign_in_status.cget("text_color") != GOOD:
+            self.hide_sign_in_panel()
 
         self.set_thumbnail(None, "…")
         self.preview_title.configure(text="Looking up the link…")
@@ -2008,14 +2114,28 @@ class VideoDownloader:
     def fill_preview(self, result):
 
         if result["error"]:
-            self.set_thumbnail(None, "!")
-            self.preview_title.configure(text="Couldn't open this link")
+            needs_account = result.get("needs_sign_in")
+
+            self.set_thumbnail(None, "🔒" if needs_account else "!")
+            self.preview_title.configure(
+                text="This needs an account"
+                if needs_account
+                else "Couldn't open this link"
+            )
             self.preview_meta.configure(text=result["url"])
             self.preview_badges.configure(text="")
             self.preview_message.configure(text=result["error"], text_color=BAD)
             self.set_modes([VIDEO, AUDIO])
             self.set_quality_choices([])
+
+            # Offer sign-in right here, only when it can help
+            if needs_account:
+                self.show_sign_in_panel(site_of(result["url"]))
+            else:
+                self.hide_sign_in_panel()
             return
+
+        self.hide_sign_in_panel()
 
         self.set_thumbnail(result["thumbnail"])
         self.preview_title.configure(text=result["title"] or "Untitled")
@@ -2118,47 +2238,220 @@ class VideoDownloader:
         self.quality.set(choice)
 
     # -------------------------------
-    # SIGN IN
+    # SIGN IN  (offered only when a link needs an account)
     # -------------------------------
 
-    def on_sign_in_change(self, value):
+    def create_sign_in_panel(self, card):
+        """The "🔒 Sign in to view this" panel inside the preview card."""
 
-        self.apply_sign_in(value, ask_for_file=True)
+        self.sign_in_panel = ctk.CTkFrame(card, fg_color=FIELD, corner_radius=12)
 
-    def apply_sign_in(self, value, ask_for_file):
+        ctk.CTkLabel(
+            self.sign_in_panel,
+            text="🔒  Sign in to view this",
+            font=self.fonts["heading"],
+            text_color=TEXT,
+            anchor="w",
+        ).pack(anchor="w", padx=16, pady=(14, 0))
 
-        if value == COOKIES_FILE and (ask_for_file or not self.cookie_file):
-            path = filedialog.askopenfilename(
+        self.sign_in_text = ctk.CTkLabel(
+            self.sign_in_panel,
+            text="",
+            font=self.fonts["small"],
+            text_color=MUTED,
+            anchor="w",
+            justify="left",
+            wraplength=420,  # narrow enough not to widen the window
+        )
+        self.sign_in_text.pack(anchor="w", padx=16, pady=(2, 10))
+
+        self.sign_in_buttons = ctk.CTkFrame(self.sign_in_panel, fg_color="transparent")
+        self.sign_in_buttons.pack(anchor="w", padx=12, pady=(0, 14))
+
+        # Packed only while it has text (see set_sign_in_status)
+        self.sign_in_status = ctk.CTkLabel(
+            self.sign_in_panel,
+            text="",
+            font=self.fonts["small"],
+            text_color=MUTED,
+            anchor="w",
+            justify="left",
+            wraplength=460,
+        )
+
+    def pill(self, master, text, command, primary=False):
+
+        return ctk.CTkButton(
+            master,
+            text=text,
+            command=command,
+            width=0,
+            height=34,
+            corner_radius=17,
+            border_width=0 if primary else 1,
+            border_color=BORDER,
+            fg_color=ACCENT if primary else CARD,
+            hover_color=ACCENT_HOVER if primary else FIELD_HOVER,
+            text_color="white" if primary else TEXT,
+            text_color_disabled=FAINT,
+            font=self.fonts["label"],
+        )
+
+    def show_sign_in_panel(self, site):
+
+        self.sign_in_site = site
+        place = site or "this site"
+
+        self.sign_in_text.configure(
+            text=f"Continue with the browser where you're signed in to {place}. "
+            "Your login is read from this PC only and never uploaded."
+        )
+
+        for button in self.sign_in_buttons.winfo_children():
+            button.destroy()
+
+        browsers = installed_browsers() or ["Firefox", "Chrome", "Edge"]
+
+        # Firefox first: Chrome and Edge often lock their logins on Windows
+        browsers.sort(key=lambda name: name != "Firefox")
+
+        for index, browser in enumerate(browsers):
+            self.pill(
+                self.sign_in_buttons,
+                browser,
+                lambda b=browser: self.choose_sign_in(b),
+                primary=index == 0,
+            ).pack(side="left", padx=4)
+
+        self.pill(
+            self.sign_in_buttons,
+            "Cookies file…",
+            lambda: self.choose_sign_in(COOKIES_FILE),
+        ).pack(side="left", padx=4)
+
+        if self.sign_in_method != NO_SIGN_IN:
+            source = self.sign_in_source(self.sign_in_method)
+            self.set_sign_in_status(
+                text=f"You're signed in with {source}, but that account can't open "
+                "this. Try another browser or account.",
+                text_color=WARN,
+            )
+        else:
+            self.set_sign_in_status(text="")
+
+        self.sign_in_panel.grid(
+            row=4, column=0, columnspan=3, sticky="ew", padx=14, pady=(0, 14)
+        )
+
+    def hide_sign_in_panel(self):
+
+        self.sign_in_panel.grid_remove()
+        self.set_sign_in_status(text="", text_color=MUTED)
+
+    def set_sign_in_status(self, text, text_color=MUTED):
+        """Status line under the pills; takes no space while empty."""
+
+        self.sign_in_status.configure(text=text, text_color=text_color)
+
+        if text:
+            self.sign_in_status.pack(anchor="w", padx=16, pady=(0, 14))
+        else:
+            self.sign_in_status.pack_forget()
+
+    def set_sign_in_buttons(self, state):
+
+        for button in self.sign_in_buttons.winfo_children():
+            button.configure(state=state)
+
+    def choose_sign_in(self, method):
+
+        cookie_file = self.cookie_file
+
+        if method == COOKIES_FILE:
+            cookie_file = filedialog.askopenfilename(
                 title="Choose your cookies.txt file",
                 filetypes=[("Cookies file", "*.txt"), ("All files", "*.*")],
             )
+            if not cookie_file:
+                return  # cancelled
 
-            if not path:
-                # Cancelled: go back to whatever was selected before
-                self.sign_in.set(self.previous_sign_in)
-                return
-
-            self.cookie_file = path
-
-        self.previous_sign_in = value
         self.sign_in_request += 1
+        request = self.sign_in_request
+        site = getattr(self, "sign_in_site", None)
+        source = self.sign_in_source(method, cookie_file)
+
+        self.set_sign_in_buttons("disabled")
+        self.set_sign_in_status(text=f"Checking {source}…", text_color=MUTED)
+
+        def work():
+            try:
+                sites, error = read_logins(method, cookie_file), None
+            except Exception as problem:
+                log.warning("Reading logins from %s failed: %s", method, problem)
+                sites, error = [], friendly_error(problem)
+
+            self.ui(
+                self.sign_in_checked, method, cookie_file, sites, error, site, request
+            )
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def sign_in_checked(self, method, cookie_file, sites, error, site, request):
+
+        if request != self.sign_in_request:
+            return  # the user clicked something else meanwhile
+
+        self.set_sign_in_buttons("normal")
+        source = self.sign_in_source(method, cookie_file)
+
+        if error:
+            self.set_sign_in_status(text=f"✕  {error}", text_color=BAD)
+            return
+
+        if site and site not in sites:
+            domain = SITE_LOGIN_COOKIES[site][0]
+
+            if method == COOKIES_FILE:
+                advice = (
+                    f"This cookies file has no {site} login. Export it again "
+                    f"while signed in on {domain}."
+                )
+            else:
+                advice = (
+                    f"{method} isn't signed in to {site}. Open {domain} in "
+                    f"{method}, sign in, then click {method} here again."
+                )
+
+            self.set_sign_in_status(text=f"✕  {advice}", text_color=BAD)
+            return
+
+        # Signed in: remember it and try the link again
+        self.sign_in_method = method
+        if method == COOKIES_FILE:
+            self.cookie_file = cookie_file
         self.save_settings()
+        self.update_sign_in_chip()
 
-        if value == NO_SIGN_IN:
-            self.show_note(*self.default_note)
-        else:
-            source = self.sign_in_source(value)
-            self.show_note(f"Checking which sites {source} is signed in to…", MUTED)
+        self.set_sign_in_status(
+            text=f"✓  Signed in with {source}. Trying again…", text_color=GOOD
+        )
+        self.start_lookup(force=True)
 
-            threading.Thread(
-                target=self.check_sign_in,
-                args=(value, self.cookie_file, self.sign_in_request),
-                daemon=True,
-            ).start()
+    def sign_out(self):
 
-        # Sign-in can change what a link offers (or unlock a private one)
-        if self.get_urls():
-            self.start_lookup(force=True)
+        self.sign_in_method = NO_SIGN_IN
+        self.save_settings()
+        self.update_sign_in_chip()
+
+    def update_sign_in_chip(self):
+
+        if self.sign_in_method == NO_SIGN_IN:
+            self.sign_in_chip.pack_forget()
+            return
+
+        source = self.sign_in_source(self.sign_in_method)
+        self.sign_in_chip.configure(text=f"🔒  {source}   ✕")
+        self.sign_in_chip.pack(side="right")
 
     def sign_in_source(self, value, cookie_file=None):
 
@@ -2166,60 +2459,6 @@ class VideoDownloader:
             return os.path.basename(cookie_file or self.cookie_file or "cookies file")
 
         return value
-
-    def check_sign_in(self, value, cookie_file, request):
-
-        # Reads saved cookies on this PC only (nothing is sent anywhere)
-        source = self.sign_in_source(value, cookie_file)
-
-        try:
-            from yt_dlp.cookies import (
-                YoutubeDLCookieJar,
-                extract_cookies_from_browser,
-            )
-
-            if value == COOKIES_FILE:
-                jar = YoutubeDLCookieJar(cookie_file)
-                jar.load()
-            else:
-                jar = extract_cookies_from_browser(value.lower(), logger=QuietLogger())
-
-            cookies = [cookie for cookie in jar if not cookie.is_expired()]
-
-            signed_in = [
-                site
-                for site, (domain, names) in SITE_LOGIN_COOKIES.items()
-                if any(
-                    cookie.domain.endswith(domain) and cookie.name in names
-                    for cookie in cookies
-                )
-            ]
-
-            if signed_in:
-                text = f"✓  Signed in via {source} to {', '.join(signed_in)}."
-                color = GOOD
-            elif value == COOKIES_FILE:
-                text = (
-                    f"✕  {source} has no valid login for {SITE_NAMES} (or it has "
-                    "expired). Export the cookies again while signed in."
-                )
-                color = BAD
-            else:
-                text = (
-                    f"✕  {value} isn't signed in to {SITE_NAMES}. Sign in there, "
-                    f"close {value}, then choose it again."
-                )
-                color = BAD
-
-        except Exception as error:
-            text, color = f"✕  {friendly_error(error)}", BAD
-
-        def show():
-            # Ignore if the user has picked something else since
-            if request == self.sign_in_request:
-                self.show_note(text, color)
-
-        self.ui(show)
 
     # -------------------------------
     # DOWNLOAD

@@ -3,6 +3,7 @@
 import gc
 import json
 import threading
+import time
 
 from conftest import pump, wait_until
 from PIL import Image
@@ -193,11 +194,14 @@ def test_pause_resume_and_cancel(app):
     progress = []
 
     def job(url, options):
-        for _ in range(200):
+        # A "download" that keeps going until it's cancelled (max ~30 s), so the
+        # test controls the timing instead of racing a fast loop
+        for _ in range(30_000):
             app.progress_hook(
                 {"status": "downloading", "downloaded_bytes": 1, "total_bytes": 100}
             )
             progress.append(1)
+            time.sleep(0.001)
         return 1
 
     app.is_downloading = True

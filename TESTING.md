@@ -46,6 +46,8 @@ Tests also run automatically on GitHub for every push (Actions → **tests**).
 | BUG-003 | The chosen quality wasn't kept for the next link | The menu showed "Checking…" while loading, so the old choice was read too late | Remember the height the user picked | `test_quality_menu_lists_sizes_and_remembers_height` |
 | BUG-004 | A long title made the window wider and wider | Title wrap width followed the card width, and the card grew with the title | Cap the wrap width | (visual check) |
 | UX-001 | Window taller than small laptop screens; the progress area was cut off | Every setting was on the main screen | Settings moved to a ⚙ Settings page; save folder stays visible | `test_window_fits_a_small_laptop_screen` |
+| BUG-005 | Long error messages made the window wider on scaled displays (125%) | Wrap width mixed screen pixels with CustomTkinter's scaled points | Convert the card width before wrapping | `test_bug005_panel_and_long_message_do_not_widen_the_window` |
+| UX-002 | Sign-in was a permanent setting most people never need | Not shown where it matters | Sign-in panel appears only on links that need an account. Installed browsers only, Firefox first, auto-retry, sign out from the chip | `tests/test_sign_in.py` |
 | ARCH-001 | Background threads updated the window directly | Tk isn't thread-safe | Threads hand work to the main thread through a queue | all UI tests |
 
 ## Manual checklist (before each release)
@@ -78,6 +80,13 @@ Do this on the **installed** app (`release\VideoDownloader-Setup-x.y.z.exe`), id
 - [ ] Pause for a minute, then Resume continues. Cancel while paused works.
 - [ ] Download, cancel, paste another link: the preview and thumbnail show (BUG-001).
 - [ ] ⚙ Settings → Open error log opens the log.
+
+**Sign-in**
+- [ ] A normal public video shows no sign-in anywhere.
+- [ ] A private / login-only post shows "🔒 Sign in to view this" with only the browsers installed on that PC.
+- [ ] Signed in to the site in Firefox: click Firefox, then the link reloads by itself and works.
+- [ ] A browser not signed in to that site explains what to do.
+- [ ] The "🔒 Firefox ✕" chip signs out.
 
 ## Reporting a bug
 
