@@ -5,6 +5,11 @@
   #define AppVersion "1.0.0"
 #endif
 
+; build.ps1 passes lzma2/ultra64 (release) or lzma2/fast (-Quick)
+#ifndef Compression
+  #define Compression "lzma2/ultra64"
+#endif
+
 [Setup]
 ; Never change this id: Windows uses it to recognise updates/uninstall
 AppId={{3CD4D9A6-E0A7-4CB3-99BE-E605BDF5EF67}
@@ -21,7 +26,7 @@ OutputDir=..\release
 OutputBaseFilename=VideoDownloader-Setup-{#AppVersion}
 SetupIconFile=..\assets\icon.ico
 UninstallDisplayIcon={app}\VideoDownloader.exe
-Compression=lzma2/ultra64
+Compression={#Compression}
 SolidCompression=yes
 WizardStyle=modern
 ArchitecturesAllowed=x64compatible

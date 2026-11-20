@@ -1,32 +1,66 @@
-# Builds the Windows installer:  release\VideoDownloader-Setup-<version>.exe
+# Builds the Windows installer for the version in main.py (APP_VERSION):
+#     release\VideoDownloader-Setup-<version>.exe
 #
-# Run from the project folder:   powershell -ExecutionPolicy Bypass -File build\build.ps1
+# Run from the project folder:
+#     powershell -ExecutionPolicy Bypass -File build\build.ps1          (release build)
+#     powershell -ExecutionPolicy Bypass -File build\build.ps1 -Quick   (fast test build)
+#
+# -Quick reuses the previous build and compresses less: much faster, but the
+# Setup.exe is bigger. Use the normal build for files you publish.
+#
+# Older Setup files are moved to release\old so release\ only holds the latest.
 #
 # Needs: pip install -r requirements.txt pyinstaller
 #        Inno Setup 6 (winget install JRSoftware.InnoSetup)
 #        ffmpeg on PATH, and Deno in tools\deno\deno.exe
 
+param([switch]$Quick)
+
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
+$timer = [System.Diagnostics.Stopwatch]::StartNew()
 
 # Version comes from APP_VERSION in main.py
 $version = (Select-String -Path main.py -Pattern '^APP_VERSION = "(.+)"').Matches[0].Groups[1].Value
-Write-Host "Building Video Downloader $version" -ForegroundColor Cyan
+$kind = if ($Quick) { "quick test build" } else { "release build" }
+Write-Host "Building Video Downloader $version ($kind)" -ForegroundColor Cyan
 
 # 1. Icon
 if (-not (Test-Path assets\icon.ico)) { python build\make_icon.py }
 
+# The old build folder must be deletable: a running copy of the app, or
+# Windows Defender scanning a freshly copied file, can lock it for a moment
+$running = Get-Process | Where-Object { $_.Path -like "$root\dist\*" }
+if ($running) {
+    throw "Close Video Downloader (running from the dist folder) first: $($running.ProcessName -join ', ')"
+}
+for ($try = 1; (Test-Path dist\VideoDownloader) -and $try -le 5; $try++) {
+    try { Remove-Item dist\VideoDownloader -Recurse -Force -ErrorAction Stop }
+    catch {
+        if ($try -eq 5) { throw "dist\VideoDownloader is locked (antivirus scan?). Wait a minute and try again." }
+        Start-Sleep -Seconds 3
+    }
+}
+
 # 2. App -> dist\VideoDownloader\VideoDownloader.exe
-python -m PyInstaller --noconfirm --clean --windowed `
-    --name VideoDownloader `
-    --icon "$root\assets\icon.ico" `
-    --add-data "$root\assets\icon.ico;assets" `
-    --collect-data customtkinter `
-    --collect-submodules gallery_dl `
-    --collect-all yt_dlp_ejs `
-    --workpath build\pyinstaller --specpath build\pyinstaller `
-    main.py
+#    One list of arguments. (Careful: PowerShell turns a one-item list from
+#    an `if` into plain text, and @text then passes it letter by letter.)
+$pyinstaller = @(
+    "--noconfirm", "--windowed",
+    "--name", "VideoDownloader",
+    "--icon", "$root\assets\icon.ico",
+    "--add-data", "$root\assets\icon.ico;assets",
+    "--collect-data", "customtkinter",
+    "--collect-submodules", "gallery_dl",
+    "--collect-all", "yt_dlp_ejs",
+    "--workpath", "build\pyinstaller",
+    "--specpath", "build\pyinstaller"
+)
+# A release build starts from scratch (--clean); -Quick reuses the cache
+if (-not $Quick) { $pyinstaller += "--clean" }
+
+python -m PyInstaller @pyinstaller main.py
 if ($LASTEXITCODE) { throw "PyInstaller failed" }
 
 $dist = "dist\VideoDownloader"
@@ -63,9 +97,20 @@ $iscc = @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
         Where-Object { Test-Path $_ } | Select-Object -First 1
 if (-not $iscc) { throw "Inno Setup 6 not found (winget install JRSoftware.InnoSetup)" }
 
-& $iscc "/DAppVersion=$version" build\installer.iss
+# Keep only the latest installer in release\ (older ones go to release\old)
+New-Item -ItemType Directory -Force release\old | Out-Null
+Get-ChildItem release\VideoDownloader-Setup-*.exe -ErrorAction SilentlyContinue |
+    Where-Object Name -ne "VideoDownloader-Setup-$version.exe" |
+    Move-Item -Destination release\old -Force
+
+# Maximum compression for releases; fast compression for -Quick
+$compression = if ($Quick) { "lzma2/fast" } else { "lzma2/ultra64" }
+
+& $iscc "/DAppVersion=$version" "/DCompression=$compression" /Q build\installer.iss
 if ($LASTEXITCODE) { throw "Inno Setup failed" }
 
-Get-ChildItem release\*.exe | ForEach-Object {
-    Write-Host ("Done: {0}  ({1:N0} MB)" -f $_.FullName, ($_.Length / 1MB)) -ForegroundColor Green
+$setup = Get-Item "release\VideoDownloader-Setup-$version.exe"
+Write-Host ("Done in {0:mm\:ss}: {1}  ({2:N0} MB)" -f $timer.Elapsed, $setup.FullName, ($setup.Length / 1MB)) -ForegroundColor Green
+if ($Quick) {
+    Write-Host "Quick build: fine for testing. Run without -Quick for the file you publish." -ForegroundColor Yellow
 }
