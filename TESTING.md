@@ -47,6 +47,7 @@ Tests also run automatically on GitHub for every push (Actions → **tests**).
 | BUG-004 | A long title made the window wider and wider | Title wrap width followed the card width, and the card grew with the title | Cap the wrap width | (visual check) |
 | UX-001 | Window taller than small laptop screens; the progress area was cut off | Every setting was on the main screen | Settings moved to a ⚙ Settings page; save folder stays visible | `test_window_fits_a_small_laptop_screen` |
 | BUG-005 | Long error messages made the window wider on scaled displays (125%) | Wrap width mixed screen pixels with CustomTkinter's scaled points | Convert the card width before wrapping | `test_bug005_panel_and_long_message_do_not_widen_the_window` |
+| BUG-006 | A user's videos played **sound only** (black picture) | The app picked AV1 (YouTube) or HEVC (TikTok) for the smallest file, and many Windows PCs can't decode those | Default "Plays everywhere": prefer H.264 + AAC. Sizes with no H.264 version are marked "converts" and converted with ffmpeg after downloading. "Smaller files" setting for the old behaviour | `tests/test_playable.py` (includes a real VP9 → H.264 conversion) |
 | UX-002 | Sign-in was a permanent setting most people never need | Not shown where it matters | Sign-in panel appears only on links that need an account. Installed browsers only, Firefox first, auto-retry, sign out from the chip | `tests/test_sign_in.py` |
 | ARCH-001 | Background threads updated the window directly | Tk isn't thread-safe | Threads hand work to the main thread through a queue | all UI tests |
 
@@ -70,6 +71,11 @@ Do this on the **installed** app (`release\VideoDownloader-Setup-x.y.z.exe`), id
 | TikTok photo slideshow | [ ] | – | [ ] | [ ] |
 | Instagram reel / post (signed in) | [ ] | [ ] | [ ] | [ ] |
 | Facebook video | [ ] | [ ] | [ ] | – |
+
+**Plays everywhere (BUG-006)**
+- [ ] A downloaded YouTube 1080p video shows the **picture** in the Windows Media Player / Photos app on a PC without extra codecs.
+- [ ] Picking 4K / 1440p shows "converts", the status shows "Converting… %", and the result plays with picture.
+- [ ] A TikTok download shows the picture.
 
 **Error handling**
 - [ ] Wi-Fi off, then download: "Can't reach the site…", and the app still works.

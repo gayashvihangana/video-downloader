@@ -1,4 +1,5 @@
-import ctypes
+﻿import ctypes
+import faulthandler
 import hashlib
 import io
 import json
@@ -11,6 +12,8 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
+import traceback
 import urllib.error
 import urllib.request
 from logging.handlers import RotatingFileHandler
@@ -43,7 +46,7 @@ FONT = "Segoe UI"
 
 SETTINGS_FILE = os.path.join(os.path.expanduser("~"), ".video_downloader.json")
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 
 # Updates come from the latest release of this GitHub repo. The release must
 # have a "VideoDownloader-Setup-<version>.exe" file attached (build.ps1 makes it).
@@ -89,6 +92,11 @@ use_bundled_tools()
 
 VIDEO, AUDIO, PHOTOS = "Video", "Audio", "Photos"
 
+# Video format setting. Many PCs can't show AV1/VP9/HEVC video (sound only,
+# black picture), so by default the app gets H.264 or converts to it.
+PLAYS_EVERYWHERE = "Plays everywhere (H.264)"
+SMALLER_FILES = "Smaller files (AV1 / VP9)"
+
 # Error-handling options (shown under "More options")
 RETRY_CHOICES = {"Don't retry": 0, "Retry 3 times": 3, "Retry 10 times": 10}
 DEFAULT_RETRY = "Retry 3 times"
@@ -104,6 +112,7 @@ LOG_DIR = os.path.join(
     os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "VideoDownloader"
 )
 LOG_FILE = os.path.join(LOG_DIR, "error.log")
+CRASH_FILE = os.path.join(LOG_DIR, "crash.log")
 
 log = logging.getLogger("video_downloader")
 log.addHandler(logging.NullHandler())  # silent until setup_logging() runs
@@ -124,6 +133,60 @@ def setup_logging():
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     log.addHandler(handler)
     log.setLevel(logging.INFO)
+
+    # Hard crashes (Python itself dying) skip normal error handling; this
+    # still writes where it happened to crash.log
+    global crash_file
+    try:
+        crash_file = open(CRASH_FILE, "a", encoding="utf-8")  # noqa: SIM115
+        faulthandler.enable(file=crash_file, all_threads=True)
+    except OSError:
+        pass
+
+
+crash_file = None  # kept open for faulthandler while the app runs
+
+
+def start_hang_detector(root, limit=8.0):
+    """If the window stops responding for `limit` seconds, write to the log
+    exactly where it was stuck. Returns a function that stops the detector."""
+
+    state = {"beat": time.monotonic(), "running": True}
+    main_thread = threading.main_thread().ident
+
+    def beat():
+        state["beat"] = time.monotonic()
+        if state["running"]:
+            root.after(500, beat)
+
+    def watch():
+        reported = False
+
+        while state["running"]:
+            time.sleep(min(2.0, limit / 4))
+            stuck = time.monotonic() - state["beat"]
+
+            if stuck > limit and not reported:
+                frame = sys._current_frames().get(main_thread)
+                where = "".join(traceback.format_stack(frame)) if frame else "?"
+                log.error(
+                    "Window not responding for %.0f s. It was busy here:\n%s",
+                    stuck,
+                    where,
+                )
+                reported = True
+
+            elif stuck <= limit and reported:
+                log.info("Window responding again")
+                reported = False
+
+    def stop():
+        state["running"] = False
+
+    root.after(500, beat)
+    threading.Thread(target=watch, daemon=True).start()
+
+    return stop
 
 
 BEST_QUALITY = "Best available"
@@ -671,20 +734,115 @@ def analyse_formats(info, need_audio_in_file):
             size += audio_size
             approx = approx or audio_approx
 
+        h264 = is_h264(fmt.get("vcodec"))
+
         # Prefer what yt-dlp will pick for this height: MP4, then higher fps/bitrate
         rank = (fmt.get("ext") == "mp4", fmt.get("fps") or 0, fmt.get("tbr") or 0)
-        current = by_label.get(label)
-
-        if current is None or rank > current["rank"]:
-            by_label[label] = {
+        current = by_label.setdefault(
+            label,
+            {
                 "label": label,
                 "height": height,
                 "size": size,
                 "approx": approx,
                 "rank": rank,
-            }
+                "h264": False,  # is there a version every player can show?
+                "h264_size": 0,
+                "h264_approx": True,
+                "h264_rank": None,
+            },
+        )
+
+        if rank > current["rank"]:
+            current.update(height=height, size=size, approx=approx, rank=rank)
+
+        if h264 and (current["h264_rank"] is None or rank > current["h264_rank"]):
+            current.update(
+                h264=True, h264_size=size, h264_approx=approx, h264_rank=rank
+            )
 
     return sorted(by_label.values(), key=lambda q: q["height"], reverse=True)
+
+
+def is_h264(vcodec):
+    """H.264 ("avc1…") plays on every PC, phone and TV; AV1/VP9/HEVC don't."""
+
+    return (vcodec or "").lower().startswith(("avc", "h264"))
+
+
+def convert_to_h264(path, duration, on_progress, start_process):
+    """Re-encode a video file to H.264 + AAC in place (so every player shows
+    the picture). start_process(command) must return a Popen with stdout."""
+
+    temp = path + ".converting.mp4"
+    command = [
+        shutil.which("ffmpeg") or "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostats",
+        "-i",
+        path,
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a?",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "20",
+        "-pix_fmt",
+        "yuv420p",  # 10-bit / HDR sources won't play everywhere otherwise
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-movflags",
+        "+faststart",
+        "-progress",
+        "pipe:1",
+        temp,
+    ]
+
+    process = start_process(command)
+
+    for line in process.stdout:
+        if line.startswith("out_time_us=") and duration:
+            try:
+                seconds = int(line.split("=", 1)[1]) / 1_000_000
+            except ValueError:
+                continue  # "N/A" at the very start
+            on_progress(min(max(seconds / duration, 0), 1))
+
+    process.wait()
+
+    if process.returncode:
+        if os.path.exists(temp):
+            os.remove(temp)
+        raise RuntimeError("Converting the video so it plays everywhere failed.")
+
+    os.replace(temp, path)
+
+
+class MakePlayable(PostProcessor):
+    """After download: convert to H.264 if the video isn't already."""
+
+    def __init__(self, convert):
+        super().__init__()
+        self.convert = convert  # function(path, duration)
+
+    def run(self, information):
+        vcodec = information.get("vcodec")
+        path = information.get("filepath")
+
+        if path and vcodec not in (None, "none") and not is_h264(vcodec):
+            self.convert(path, information.get("duration") or 0)
+            information["vcodec"] = "avc1"
+
+        return [], information
 
 
 def summarize_video(info, need_audio_in_file):
@@ -714,14 +872,24 @@ def summarize_video(info, need_audio_in_file):
     }
 
 
-def quality_text(quality):
+def quality_text(quality, plays_everywhere=False):
+    """ "1080p  ·  83 MB". In "plays everywhere" mode it shows the H.264 size,
+    or "converts" when there's no H.264 version (it'll be converted)."""
 
-    size = human_size(quality["size"])
+    if plays_everywhere and quality.get("h264"):
+        size, approx = quality["h264_size"], quality["h264_approx"]
+    else:
+        size, approx = quality["size"], quality["approx"]
 
-    if not size:
-        return quality["label"]
+    text = quality["label"]
 
-    return f"{quality['label']}  ·  {'~' if quality['approx'] else ''}{size}"
+    if size:
+        text += f"  ·  {'~' if approx else ''}{human_size(size)}"
+
+    if plays_everywhere and not quality.get("h264", True):
+        text += "  ·  converts"
+
+    return text
 
 
 # -------------------------------
@@ -1000,7 +1168,7 @@ class VideoDownloader:
         # Download state
         self.is_downloading = False
         self.cancel_requested = False
-        self.photo_process = None
+        self.helper_process = None
         self.current_item = (0, 0)  # (index, total)
         self.last_fraction = 0
 
@@ -1060,6 +1228,7 @@ class VideoDownloader:
                 "cookie_file": self.cookie_file,
                 "theme": ctk.get_appearance_mode().lower(),
                 "retry": self.retry_menu.get(),
+                "video_format": self.video_format_menu.get(),
                 "on_error": self.on_error_menu.get(),
             }
         )
@@ -1504,16 +1673,38 @@ class VideoDownloader:
 
         # Sign-in isn't here on purpose: it's offered right where it's needed
         # (on a link that needs an account), and signing out is on the chip.
-        if self.has_ffmpeg:
-            folder_row.grid_configure(pady=16)
-        else:
+        if not self.has_ffmpeg:
             warning = note(
                 card,
                 "ffmpeg not found: MP3 is unavailable and video quality is limited.",
                 row=1,
             )
             warning.configure(text_color=WARN)
-            warning.grid_configure(pady=(4, 16))
+
+        # Video format: compatibility (default) or smaller files
+        video_format = self.settings.get("video_format", PLAYS_EVERYWHERE)
+        self.field_label(card, "Video format").grid(
+            row=2, column=0, sticky="w", pady=(12, 0), **pad
+        )
+        self.video_format_menu = option_menu(
+            card,
+            [PLAYS_EVERYWHERE, SMALLER_FILES],
+            video_format
+            if video_format in (PLAYS_EVERYWHERE, SMALLER_FILES)
+            else PLAYS_EVERYWHERE,
+            self.on_video_format_change,
+            width=230,
+        )
+        self.video_format_menu.grid(
+            row=2, column=1, sticky="w", padx=(0, 16), pady=(12, 0)
+        )
+        note(
+            card,
+            "Plays everywhere: works on every PC, phone and TV (some qualities are "
+            "converted after downloading). Smaller files may play with sound only "
+            "on some PCs.",
+            row=3,
+        ).grid_configure(pady=(4, 16))
 
         # --- When something goes wrong ---
         card = section("WHEN SOMETHING GOES WRONG")
@@ -1572,6 +1763,15 @@ class VideoDownloader:
             self.show_home()
         else:
             self.show_settings()
+
+    def plays_everywhere(self):
+
+        return self.video_format_menu.get() == PLAYS_EVERYWHERE
+
+    def on_video_format_change(self, value):
+
+        self.update_quality_menu()  # sizes and "converts" labels change
+        self.save_settings()
 
     def retries(self):
 
@@ -2227,13 +2427,23 @@ class VideoDownloader:
         # BUG FIX: read the height the user picked, not the menu's current
         # text (that's "Checking…" while a new link loads)
         previous_height = self.preferred_height
+        everywhere = self.plays_everywhere()
 
-        self.qualities = {quality_text(q): q["height"] for q in qualities}
+        self.qualities = {quality_text(q, everywhere): q["height"] for q in qualities}
         self.quality.configure(values=list(self.qualities), state="normal")
+
+        # Default: the best quality that needs no converting (in "plays
+        # everywhere" mode), so a normal download is quick and just works
+        no_convert = [
+            quality_text(q, everywhere)
+            for q in qualities
+            if not everywhere or q.get("h264", True)
+        ]
+        default = (no_convert or list(self.qualities))[0]
 
         choice = next(
             (text for text, h in self.qualities.items() if h == previous_height),
-            next(iter(self.qualities)),
+            default,
         )
         self.quality.set(choice)
 
@@ -2484,7 +2694,7 @@ class VideoDownloader:
 
         if self.paused:
             self.resume_event.clear()  # the download thread waits at its next step
-            set_process_paused(self.photo_process, True)
+            set_process_paused(self.helper_process, True)
 
             self.progress.configure(progress_color=FAINT)
             self.speed_label.configure(text="")
@@ -2492,7 +2702,7 @@ class VideoDownloader:
                 f"{self.item_prefix()}Paused at {self.last_fraction:.0%}", MUTED
             )
         else:
-            set_process_paused(self.photo_process, False)
+            set_process_paused(self.helper_process, False)
             self.resume_event.set()
 
             self.progress.configure(progress_color=ACCENT)
@@ -2540,8 +2750,15 @@ class VideoDownloader:
         # Exact pixel height of the chosen quality (None = best available)
         height = self.qualities.get(self.quality.get())
 
-        # Highest resolution first; among equal ones prefer MP4/M4A streams
-        options["format_sort"] = ["res", "ext:mp4:m4a"]
+        if self.plays_everywhere():
+            # At the chosen size, prefer H.264 + AAC (plays everywhere). If a
+            # size has no H.264 version, it's converted after downloading.
+            options["format_sort"] = ["res", "vcodec:h264", "acodec:aac", "ext:mp4:m4a"]
+            options["make_playable"] = True  # read by download_video_link
+        else:
+            # Highest resolution first; among equal ones prefer MP4/M4A streams
+            options["format_sort"] = ["res", "ext:mp4:m4a"]
+
         nw = NO_WATERMARK
 
         if not self.has_ffmpeg:
@@ -2682,9 +2899,9 @@ class VideoDownloader:
         # Wake a paused download so it can stop
         self.resume_event.set()
 
-        if self.photo_process and self.photo_process.poll() is None:
-            set_process_paused(self.photo_process, False)
-            self.photo_process.terminate()
+        if self.helper_process and self.helper_process.poll() is None:
+            set_process_paused(self.helper_process, False)
+            self.helper_process.terminate()
 
     def download_all(self, urls, job, options, kind, stop_on_error):
         """Download each link in turn (runs on a background thread)."""
@@ -2726,12 +2943,52 @@ class VideoDownloader:
 
     def download_video_link(self, url, options):
 
+        options = dict(options)
+        make_playable = options.pop("make_playable", False)
+
         with yt_dlp.YoutubeDL(options) as downloader:
             # Clean social-media titles before the file is named
             downloader.add_post_processor(CleanTitle(), when="pre_process")
+
+            # After merging: convert AV1/VP9/HEVC to H.264 so the picture shows
+            if make_playable and self.has_ffmpeg:
+                downloader.add_post_processor(MakePlayable(self.convert_video))
+
             downloader.download([url])
 
         return 1
+
+    def convert_video(self, path, duration):
+        """Runs on the download thread: convert to H.264 with progress."""
+
+        prefix = self.item_prefix()
+
+        def progress(fraction):
+            text = f"{prefix}Converting so it plays everywhere  {fraction:.0%}"
+            self.ui(self.update_progress, fraction, text, "")
+
+        def start(command):
+            # Kept in helper_process so Pause / Cancel work while converting
+            self.helper_process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                creationflags=NO_WINDOW,
+            )
+            return self.helper_process
+
+        self.ui(
+            self.update_progress, 0, f"{prefix}Converting so it plays everywhere…", ""
+        )
+
+        try:
+            convert_to_h264(path, duration, progress, start)
+        finally:
+            self.helper_process = None
+
+        if self.cancel_requested:
+            raise DownloadCancelled()
 
     def download_photo_link(self, url, cookie_args):
 
@@ -2771,11 +3028,11 @@ class VideoDownloader:
             stderr=subprocess.STDOUT,
         )
 
-        self.photo_process = subprocess.Popen(command, **options)
+        self.helper_process = subprocess.Popen(command, **options)
         total, done, output = len(photos), 0, []
 
         # gallery-dl prints one line per saved file ("# path" if it already existed)
-        for line in self.photo_process.stdout:
+        for line in self.helper_process.stdout:
             line = line.strip()
             output.append(line)
 
@@ -2783,12 +3040,12 @@ class VideoDownloader:
                 done += 1
                 self.ui(self.update_photo_progress, done, total)
 
-        self.photo_process.wait()
+        self.helper_process.wait()
 
         if self.cancel_requested:
             raise DownloadCancelled()
 
-        if self.photo_process.returncode and not done:
+        if self.helper_process.returncode and not done:
             raise RuntimeError(gallery_error("\n".join(output)))
 
         return done
@@ -2901,7 +3158,7 @@ class VideoDownloader:
         self.cancel_requested = False
         self.paused = False
         self.resume_event.set()
-        self.photo_process = None
+        self.helper_process = None
         self.progress.configure(progress_color=ACCENT)
         self.update_main_button()
         self.speed_label.configure(text="")
@@ -3121,4 +3378,8 @@ if __name__ == "__main__":
     root.after(300, set_window_icon, root)
 
     app = VideoDownloader(root)
+
+    # If the window ever freezes, the log will say exactly where
+    start_hang_detector(root)
+
     root.mainloop()
