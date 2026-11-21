@@ -7,8 +7,8 @@ import subprocess
 
 import pytest
 
-import main
-from main import MakePlayable, analyse_formats, convert_to_h264, is_h264, quality_text
+import core
+from core import MakePlayable, analyse_formats, convert_to_h264, is_h264, quality_text
 
 needs_ffmpeg = pytest.mark.skipif(not shutil.which("ffmpeg"), reason="needs ffmpeg")
 
@@ -179,12 +179,12 @@ def test_default_choice_needs_no_converting(app):
 
 
 def test_download_options_follow_the_video_format_setting(app):
-    app.video_format_menu.set(main.PLAYS_EVERYWHERE)
+    app.video_format_menu.set(core.PLAYS_EVERYWHERE)
     options = app.get_download_options()
     assert options["format_sort"][:2] == ["res", "vcodec:h264"]
     assert options["make_playable"] is True
 
-    app.video_format_menu.set(main.SMALLER_FILES)
+    app.video_format_menu.set(core.SMALLER_FILES)
     options = app.get_download_options()
     assert "vcodec:h264" not in options["format_sort"]
     assert "make_playable" not in options

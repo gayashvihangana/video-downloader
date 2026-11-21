@@ -2,7 +2,7 @@
 
 import pytest
 
-from main import analyse_formats, human_size, human_time, quality_text, summarize_video
+from core import analyse_formats, human_size, human_time, quality_text, summarize_video
 
 AUDIO_M4A = {
     "vcodec": "none",

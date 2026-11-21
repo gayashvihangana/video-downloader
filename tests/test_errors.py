@@ -3,7 +3,7 @@ unknown errors are still readable (never empty, no colour codes)."""
 
 import pytest
 
-from main import friendly_error
+from core import friendly_error
 
 
 @pytest.mark.parametrize(

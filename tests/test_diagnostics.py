@@ -4,8 +4,9 @@ import logging
 import time
 
 from conftest import pump
+from PySide6.QtCore import QTimer
 
-import main
+import core
 
 
 class ListHandler(logging.Handler):
@@ -23,20 +24,24 @@ def freeze_the_window_for(seconds):
     time.sleep(seconds)
 
 
-def test_hang_detector_logs_where_the_window_was_stuck(tk_root):
-    handler = ListHandler()
-    main.log.addHandler(handler)
-    main.log.setLevel(logging.INFO)
+def schedule(milliseconds, function):
+    QTimer.singleShot(milliseconds, function)
 
-    stop = main.start_hang_detector(tk_root, limit=1.0)
+
+def test_hang_detector_logs_where_the_window_was_stuck(qapp):
+    handler = ListHandler()
+    core.log.addHandler(handler)
+    core.log.setLevel(logging.INFO)
+
+    stop = core.start_hang_detector(schedule, limit=1.0)
     try:
-        pump(tk_root, 0.8)
-        tk_root.after(0, freeze_the_window_for, 3)
-        pump(tk_root, 4.5)  # includes the 3 s freeze, then time to recover
+        pump(0.8)
+        QTimer.singleShot(0, lambda: freeze_the_window_for(3))
+        pump(4.5)  # includes the 3 s freeze, then time to recover
     finally:
         stop()
-        main.log.removeHandler(handler)
-        main.log.setLevel(logging.NOTSET)
+        core.log.removeHandler(handler)
+        core.log.setLevel(logging.NOTSET)
 
     stuck = [m for m in handler.messages if "not responding" in m]
     assert stuck, handler.messages
@@ -44,15 +49,15 @@ def test_hang_detector_logs_where_the_window_was_stuck(tk_root):
     assert "Window responding again" in handler.messages
 
 
-def test_no_false_alarm_when_the_window_is_fine(tk_root):
+def test_no_false_alarm_when_the_window_is_fine(qapp):
     handler = ListHandler()
-    main.log.addHandler(handler)
+    core.log.addHandler(handler)
 
-    stop = main.start_hang_detector(tk_root, limit=1.0)
+    stop = core.start_hang_detector(schedule, limit=1.0)
     try:
-        pump(tk_root, 2.5)
+        pump(2.5)
     finally:
         stop()
-        main.log.removeHandler(handler)
+        core.log.removeHandler(handler)
 
     assert not [m for m in handler.messages if "not responding" in m]

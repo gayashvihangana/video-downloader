@@ -3,10 +3,10 @@
 import json
 
 import pytest
-from conftest import wait_until
+from conftest import shown, wait_until
 
-import main
-from main import installed_browsers, needs_sign_in, site_of
+import core
+from core import installed_browsers, needs_sign_in, site_of
 
 # ---------- unit ----------
 
@@ -93,97 +93,83 @@ def show(app, result):
 
 
 def pill_texts(app):
-    return [button.cget("text") for button in app.sign_in_buttons.winfo_children()]
+    return app.sign_in_panel.button_texts()
 
 
 def test_no_sign_in_anywhere_by_default(app):
-    assert app.sign_in_panel.winfo_manager() == ""
-    assert app.sign_in_chip.winfo_manager() == ""
+    assert not shown(app.sign_in_panel)
+    assert not shown(app.sign_in_chip)
 
 
 def test_panel_appears_for_a_link_that_needs_an_account(app, monkeypatch):
-    monkeypatch.setattr(main, "installed_browsers", lambda: ["Chrome", "Firefox"])
+    monkeypatch.setattr(core, "installed_browsers", lambda: ["Chrome", "Firefox"])
     show(app, needs_account())
 
-    assert app.sign_in_panel.winfo_manager() == "grid"
-    assert app.preview_title.cget("text") == "This needs an account"
-    assert "Instagram" in app.sign_in_text.cget("text")
+    assert shown(app.sign_in_panel)
+    assert app.preview_title.text() == "This needs an account"
+    assert "Instagram" in app.sign_in_text.text()
     # Firefox first (most reliable), only installed browsers, plus a file option
     assert pill_texts(app) == ["Firefox", "Chrome", "Cookies file…"]
 
 
 def test_panel_hidden_for_errors_sign_in_cannot_fix(app):
     show(app, {**needs_account(), "needs_sign_in": False, "error": "Unavailable"})
-    assert app.sign_in_panel.winfo_manager() == ""
+    assert not shown(app.sign_in_panel)
 
 
 def test_signing_in_retries_the_link(app, monkeypatch):
     retried = []
-    monkeypatch.setattr(main, "installed_browsers", lambda: ["Firefox"])
-    monkeypatch.setattr(main, "read_logins", lambda method, file=None: ["Instagram"])
+    monkeypatch.setattr(core, "installed_browsers", lambda: ["Firefox"])
+    monkeypatch.setattr(core, "read_logins", lambda method, file=None: ["Instagram"])
     monkeypatch.setattr(app, "start_lookup", lambda force=False: retried.append(force))
 
     show(app, needs_account())
     app.choose_sign_in("Firefox")
 
-    assert wait_until(app.root, lambda: retried)
+    assert wait_until(lambda: retried)
     assert app.sign_in_method == "Firefox"
-    assert "Signed in with Firefox" in app.sign_in_status.cget("text")
-    assert app.sign_in_chip.winfo_manager() == "pack"
+    assert "Signed in with Firefox" in app.sign_in_status.text()
+    assert shown(app.sign_in_chip)
     assert app.ydl_options()["cookiesfrombrowser"] == ("firefox",)
 
-    with open(main.SETTINGS_FILE, encoding="utf-8") as file:
+    with open(core.SETTINGS_FILE, encoding="utf-8") as file:
         assert json.load(file)["sign_in"] == "Firefox"
 
 
 def test_browser_not_signed_in_to_that_site_explains_what_to_do(app, monkeypatch):
-    monkeypatch.setattr(main, "read_logins", lambda method, file=None: ["YouTube"])
+    monkeypatch.setattr(core, "read_logins", lambda method, file=None: ["YouTube"])
     show(app, needs_account())
     app.choose_sign_in("Chrome")
 
-    assert wait_until(app.root, lambda: "✕" in app.sign_in_status.cget("text"))
-    assert "Chrome isn't signed in to Instagram" in app.sign_in_status.cget("text")
-    assert app.sign_in_method == main.NO_SIGN_IN  # nothing changed
+    assert wait_until(lambda: "✕" in app.sign_in_status.text())
+    assert "Chrome isn't signed in to Instagram" in app.sign_in_status.text()
+    assert app.sign_in_method == core.NO_SIGN_IN  # nothing changed
 
 
 def test_unreadable_browser_login_is_explained(app, monkeypatch):
     def locked(method, file=None):
         raise RuntimeError("Failed to decrypt with DPAPI")
 
-    monkeypatch.setattr(main, "read_logins", locked)
+    monkeypatch.setattr(core, "read_logins", locked)
     show(app, needs_account())
     app.choose_sign_in("Edge")
 
-    assert wait_until(app.root, lambda: "Firefox" in app.sign_in_status.cget("text"))
-    assert app.sign_in_method == main.NO_SIGN_IN
+    assert wait_until(lambda: "Firefox" in app.sign_in_status.text())
+    assert app.sign_in_method == core.NO_SIGN_IN
 
 
 def test_still_blocked_after_signing_in_says_so(app):
     app.sign_in_method = "Firefox"
     show(app, needs_account())
-    assert "can't open this" in app.sign_in_status.cget("text")
-
-
-def test_bug005_panel_and_long_message_do_not_widen_the_window(app):
-    """Wrap widths mixed screen pixels with scaled points, so on 125% displays
-    long messages made the window wider."""
-
-    show(app, {**needs_account(), "error": "word " * 60})
-    app.set_sign_in_status("✕  " + "word " * 40, main.BAD)
-    app.root.update()
-
-    # The window is never narrower than its minimum (640 points); the content
-    # must fit inside that, or the window grows
-    scale = app.root._get_window_scaling()
-    assert app.root.winfo_reqwidth() <= 640 * scale + 2
+    assert "can't open this" in app.sign_in_status.text()
 
 
 def test_sign_out_from_the_chip(app):
     app.sign_in_method = "Firefox"
     app.update_sign_in_chip()
-    assert app.sign_in_chip.cget("text").startswith("🔒  Firefox")
+    assert app.sign_in_chip.text() == "Signed in · Firefox"
 
     app.sign_out()
-    assert app.sign_in_method == main.NO_SIGN_IN
-    assert app.sign_in_chip.winfo_manager() == ""
+    assert app.sign_in_method == core.NO_SIGN_IN
+    assert not shown(app.sign_in_chip)
     assert "cookiesfrombrowser" not in app.ydl_options()

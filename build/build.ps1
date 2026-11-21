@@ -1,4 +1,4 @@
-# Builds the Windows installer for the version in main.py (APP_VERSION):
+# Builds the Windows installer for the version in core.py (APP_VERSION):
 #     release\VideoDownloader-Setup-<version>.exe
 #
 # Run from the project folder:
@@ -21,8 +21,8 @@ $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 $timer = [System.Diagnostics.Stopwatch]::StartNew()
 
-# Version comes from APP_VERSION in main.py
-$version = (Select-String -Path main.py -Pattern '^APP_VERSION = "(.+)"').Matches[0].Groups[1].Value
+# Version comes from APP_VERSION in core.py
+$version = (Select-String -Path core.py -Pattern '^APP_VERSION = "(.+)"').Matches[0].Groups[1].Value
 $kind = if ($Quick) { "quick test build" } else { "release build" }
 Write-Host "Building Video Downloader $version ($kind)" -ForegroundColor Cyan
 
@@ -51,7 +51,7 @@ $pyinstaller = @(
     "--name", "VideoDownloader",
     "--icon", "$root\assets\icon.ico",
     "--add-data", "$root\assets\icon.ico;assets",
-    "--collect-data", "customtkinter",
+    "--collect-data", "qfluentwidgets",
     "--collect-submodules", "gallery_dl",
     "--collect-all", "yt_dlp_ejs",
     "--workpath", "build\pyinstaller",
@@ -64,6 +64,19 @@ python -m PyInstaller @pyinstaller main.py
 if ($LASTEXITCODE) { throw "PyInstaller failed" }
 
 $dist = "dist\VideoDownloader"
+
+# Drop parts of Qt the app never uses (QML/Quick, virtual keyboard, PDF,
+# software OpenGL, translations): about 45 MB smaller. The window only needs
+# Widgets, Gui, Svg and the qwindows platform plugin.
+$qt = "$dist\_internal\PySide6"
+@(
+    "opengl32sw.dll", "Qt6Quick*.dll", "Qt6Qml*.dll", "Qt6VirtualKeyboard*.dll",
+    "Qt6Pdf.dll", "translations",
+    "plugins\platforminputcontexts", "plugins\generic", "plugins\networkinformation",
+    "plugins\tls", "plugins\imageformats\qpdf.dll",
+    "plugins\platforms\qdirect2d.dll", "plugins\platforms\qminimal.dll",
+    "plugins\platforms\qoffscreen.dll"
+) | ForEach-Object { Remove-Item "$qt\$_" -Recurse -Force -ErrorAction SilentlyContinue }
 
 # 3. Bundle ffmpeg (no ffplay, it isn't needed) and its licence
 $ffmpeg = Split-Path -Parent (Get-Command ffmpeg).Source
@@ -85,7 +98,8 @@ https://github.com/gayashvihangana/video-downloader
 This app includes:
 - yt-dlp (Unlicense)            https://github.com/yt-dlp/yt-dlp
 - gallery-dl (GPL-2.0)          https://github.com/mikf/gallery-dl
-- CustomTkinter (MIT)           https://github.com/TomSchimansky/CustomTkinter
+- Qt for Python / PySide6 (LGPL-3.0)  https://www.qt.io/qt-for-python
+- PySide6-Fluent-Widgets (GPL-3.0)    https://github.com/zhiyiYo/PyQt-Fluent-Widgets
 - Pillow (MIT-CMU)              https://python-pillow.org
 - FFmpeg (GPL, see tools\ffmpeg\LICENSE.txt)  https://ffmpeg.org
 - Deno (MIT)                    https://github.com/denoland/deno

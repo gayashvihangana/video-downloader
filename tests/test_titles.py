@@ -3,7 +3,7 @@ the edges (empty, only hashtags, very long, "C#")."""
 
 import pytest
 
-from main import clean_title
+from core import clean_title
 
 
 def info(site, title, **extra):

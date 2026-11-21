@@ -4,8 +4,8 @@ import os
 
 import pytest
 
-import main
-from main import check_folder, check_links, parse_version, retry_options, safe_name
+import core
+from core import check_folder, check_links, parse_version, retry_options, safe_name
 
 
 def test_check_links_accepts_links_and_reports_other_lines():
@@ -48,7 +48,7 @@ class FakeUsage:
 
 
 def test_check_folder_reports_not_enough_space(tmp_path, monkeypatch):
-    monkeypatch.setattr(main.shutil, "disk_usage", lambda path: FakeUsage(1_000_000))
+    monkeypatch.setattr(core.shutil, "disk_usage", lambda path: FakeUsage(1_000_000))
     problem = check_folder(str(tmp_path), needed_bytes=50_000_000)
     assert "Not enough disk space" in problem
     assert "50 MB" in problem
@@ -57,7 +57,7 @@ def test_check_folder_reports_not_enough_space(tmp_path, monkeypatch):
 def test_check_folder_space_boundary(tmp_path, monkeypatch):
     # needs 100 MB (+5% headroom = 105 MB)
     usage = FakeUsage(105_000_000)
-    monkeypatch.setattr(main.shutil, "disk_usage", lambda path: usage)
+    monkeypatch.setattr(core.shutil, "disk_usage", lambda path: usage)
     assert check_folder(str(tmp_path), needed_bytes=100_000_000) is None
 
     usage.free = 104_999_999

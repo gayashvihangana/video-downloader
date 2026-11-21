@@ -3,6 +3,7 @@
 - Tests never touch the real settings file or downloads folder (tmp_path).
 - No test uses the internet, except ones marked `live` (skipped unless
   RUN_LIVE=1 is set).
+- Windows are drawn off-screen, so nothing flashes up while tests run.
 """
 
 import os
@@ -11,11 +12,12 @@ import time
 
 import pytest
 
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import customtkinter as ctk  # noqa: E402
+from PySide6.QtWidgets import QApplication  # noqa: E402
 
-import main  # noqa: E402
+import core  # noqa: E402
 
 
 def pytest_collection_modifyitems(config, items):
@@ -28,60 +30,61 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip_live)
 
 
-def pump(root, seconds=0.2):
-    """Let Tk process pending events/callbacks for a moment."""
+def pump(seconds=0.2):
+    """Let Qt process pending events/callbacks for a moment."""
 
     end = time.time() + seconds
     while time.time() < end:
-        root.update()
+        QApplication.processEvents()
         time.sleep(0.01)
 
 
-def wait_until(root, condition, timeout=5.0):
+def wait_until(condition, timeout=5.0):
     """Pump events until condition() is true (or fail after timeout)."""
 
     end = time.time() + timeout
     while time.time() < end:
-        root.update()
+        QApplication.processEvents()
         if condition():
             return True
         time.sleep(0.01)
     return False
 
 
+def shown(widget):
+    """Visible as far as the app is concerned (the test window is hidden)."""
+
+    return not widget.isHidden()
+
+
 @pytest.fixture(scope="session")
-def tk_root():
-    """One hidden Tk window for the whole test run.
+def qapp():
+    """One QApplication for the whole test run."""
 
-    Creating and destroying many Tk roots in one process sometimes fails on
-    Windows ("Can't find a usable init.tcl"), so tests share one root and each
-    test builds a fresh app inside it.
-    """
+    from ui import theme
 
-    root = ctk.CTk()
-    root.withdraw()
-    yield root
-    root.destroy()
+    application = QApplication.instance() or QApplication([])
+    theme.apply_theme("light")
+    yield application
 
 
 @pytest.fixture
-def app(tk_root, tmp_path, monkeypatch):
-    """A fresh app (hidden), with settings and downloads in tmp_path."""
+def app(qapp, tmp_path, monkeypatch):
+    """A fresh app window (not shown), with settings and downloads in tmp_path."""
 
-    monkeypatch.setattr(main, "SETTINGS_FILE", str(tmp_path / "settings.json"))
-    monkeypatch.setattr(main, "APP_DIR", str(tmp_path))
+    monkeypatch.setattr(core, "SETTINGS_FILE", str(tmp_path / "settings.json"))
+    monkeypatch.setattr(core, "APP_DIR", str(tmp_path))
 
-    application = main.VideoDownloader(tk_root)
-    pump(tk_root, 0.1)
+    from ui.window import VideoDownloader
 
-    yield application
+    window = VideoDownloader()
+    pump(0.05)
 
-    # Stop anything still running, then clear the window for the next test
-    application.cancel_requested = True
-    application.resume_event.set()
+    yield window
 
-    for job in tk_root.tk.splitlist(tk_root.tk.call("after", "info")):
-        tk_root.tk.call("after", "cancel", job)
-
-    for child in tk_root.winfo_children():
-        child.destroy()
+    # Stop anything still running, then throw the window away
+    window.cancel_requested = True
+    window.is_downloading = False
+    window.resume_event.set()
+    window.deleteLater()
+    pump(0.05)
