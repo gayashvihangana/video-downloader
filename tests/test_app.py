@@ -308,6 +308,28 @@ def test_bug005_long_messages_do_not_widen_the_window(app):
     assert app.minimumSizeHint().width() <= 1000
 
 
+def test_window_opens_without_ffmpeg(qapp, tmp_path, monkeypatch):
+    """No ffmpeg on PATH (like a fresh PC or CI): the window still opens and
+    Settings explains what's missing. It used to crash on start."""
+
+    monkeypatch.setattr(core, "SETTINGS_FILE", str(tmp_path / "settings.json"))
+    monkeypatch.setattr(core, "APP_DIR", str(tmp_path))
+    monkeypatch.setattr("shutil.which", lambda name, *args, **kwargs: None)
+
+    from qfluentwidgets import SettingCard
+
+    from ui.window import VideoDownloader
+
+    window = VideoDownloader()
+    try:
+        assert not window.has_ffmpeg
+        titles = [card.titleLabel.text() for card in window.findChildren(SettingCard)]
+        assert "ffmpeg not found" in titles
+    finally:
+        window.deleteLater()
+        pump(0.05)
+
+
 def test_error_options_are_remembered(app):
     app.retry_menu.set("Retry 10 times")
     app.on_error_menu.set(core.STOP_ON_ERROR)

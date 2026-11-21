@@ -51,6 +51,7 @@ from qfluentwidgets import (
     TransparentPushButton,
     TransparentToolButton,
     isDarkTheme,
+    setCustomStyleSheet,
 )
 from yt_dlp.utils import DownloadCancelled
 
@@ -612,7 +613,12 @@ class VideoDownloader(FluentWindow):
                 "with: winget install Gyan.FFmpeg",
                 downloads,
             )
-            paint(warning.contentLabel, WARN)
+            # The card's labels are plain QLabels (no setTextColor), so the
+            # colour goes in the card's own light/dark stylesheet
+            setCustomStyleSheet(
+                warning,
+                *(f"QLabel#contentLabel {{ color: {color}; }}" for color in WARN),
+            )
             downloads.addSettingCard(warning)
 
         layout.addWidget(downloads)
