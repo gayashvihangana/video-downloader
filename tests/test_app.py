@@ -177,125 +177,290 @@ def test_mp3_without_ffmpeg_is_explained(app):
     assert "ffmpeg" in app.status_label.text()
 
 
-# ---------- downloading (job faked) ----------
+# ---------- downloading (jobs faked) ----------
 
 
-def run_downloads(app, links, outcomes, stop=False):
-    """Run the real download loop with a fake job: outcomes[link] = None (ok)
-    or an error message."""
+def finished(app):
+    return lambda: not app.is_downloading
 
-    def job(url, options):
-        if outcomes.get(url):
-            raise RuntimeError(outcomes[url])
+
+def quick_job(outcomes=None):
+    """A fake download: outcomes[link] = error message, or missing for ok."""
+
+    outcomes = outcomes or {}
+
+    def job(task):
+        if outcomes.get(task.url):
+            raise RuntimeError(outcomes[task.url])
         return 1
 
-    app.is_downloading = True
-    app.download_all(links, job, {}, "file", stop)
-
-    # Wait for the result, not a fixed time (fixed sleeps make flaky tests)
-    assert wait_until(lambda: not app.is_downloading)
+    return job
 
 
-def test_skip_failed_links_and_offer_retry(app):
-    run_downloads(
-        app,
+class SlowJob:
+    """A fake download that reports progress until released or cancelled
+    (max ~30 s), so a test controls the timing instead of racing it."""
+
+    def __init__(self, app):
+        self.app = app
+        self.release = threading.Event()
+        self.steps = []
+
+    def __call__(self, task):
+        for _ in range(30_000):
+            if self.release.is_set():
+                return 1
+            self.app.progress_hook(
+                task,
+                {"status": "downloading", "downloaded_bytes": 1, "total_bytes": 4},
+            )
+            self.steps.append(task.url)
+            time.sleep(0.001)
+        return 1
+
+
+def test_download_button_queues_and_frees_home_for_the_next_link(app, monkeypatch):
+    slow = SlowJob(app)
+    monkeypatch.setattr(app, "download_video_link", slow)
+
+    show(app, lookup_result("https://youtu.be/a", "First video"))
+    app.url_box.setPlainText("https://youtu.be/a")
+    app.start_download()
+
+    # Home: "started", a way to the Downloads page, and an empty link box
+    assert "Download started: First video" in app.status_label.text()
+    assert shown(app.go_to_downloads_button)
+    assert app.url_box.toPlainText() == ""
+
+    # Downloads page: the link is a current download, with the preview's title
+    [task] = app.tasks
+    assert task.title == "First video"
+    assert task.thumbnail is not None
+    assert app.current_rows[task.id].title.full_text == "First video"
+    assert "Current downloads (1)" in app.current_title.text()
+
+    app.go_to_downloads_button.click()
+    assert app.stackedWidget.currentWidget() is app.downloads_page
+
+    slow.release.set()
+    assert wait_until(finished(app))
+    assert app.history[0].state == "done"
+    assert app.history[0].url == "https://youtu.be/a"
+
+
+def test_at_most_three_run_at_once_the_rest_wait(app):
+    slow = SlowJob(app)
+    links = [f"https://{name}" for name in "abcde"]
+    app.queue_downloads(links, core.VIDEO, None, "Best", job=slow)
+
+    assert [t.state for t in app.tasks].count("downloading") == 3
+    assert [t.state for t in app.tasks].count("queued") == 2
+    assert app.downloads_badge is not None and app.downloads_badge.text() == "5"
+
+    slow.release.set()
+    assert wait_until(finished(app))
+    assert len(app.history) == 5
+    assert app.downloads_badge.isHidden()
+    assert app.current_title.text() == "Current downloads"
+
+
+def test_failed_link_is_reported_and_can_be_retried(app):
+    app.queue_downloads(
         ["https://a", "https://b", "https://c"],
-        {"https://b": "ERROR: Video unavailable"},
+        core.VIDEO,
+        720,
+        "720p",
+        job=quick_job({"https://b": "ERROR: Video unavailable"}),
     )
+    assert wait_until(finished(app))
 
-    assert app.failed_links == ["https://b"]
-    assert "1 file saved" not in app.status_label.text()
-    assert "2 files saved, 1 failed" in app.status_label.text()
-    assert "unavailable" in app.status_label.text()
-    assert shown(app.retry_button)
-    assert not app.is_downloading
+    states = {t.url: t.state for t in app.history}
+    assert states == {"https://a": "done", "https://b": "failed", "https://c": "done"}
+
+    failed = next(t for t in app.history if t.state == "failed")
+    assert "unavailable" in failed.error
+    row = app.recent_rows[failed.id]
+    assert "unavailable" in row.status.text()
+    assert "retry" in row.visible_buttons()
+    assert shown(app.retry_all_button)
+
+    # Retry keeps the same choices (720p) and moves it back to Current
+    slow = SlowJob(app)
+    app.download_video_link = slow
+    app.retry_task(failed)
+    [again] = app.tasks
+    assert (again.url, again.height, again.quality) == ("https://b", 720, "720p")
+    assert failed not in app.history
+
+    slow.release.set()
+    assert wait_until(finished(app))
+    assert not shown(app.retry_all_button)
 
 
-def test_stop_everything_offers_the_unstarted_links_too(app):
-    run_downloads(
-        app,
+def test_stop_after_an_error_skips_the_rest_of_those_links(app, monkeypatch):
+    monkeypatch.setattr("ui.window.MAX_PARALLEL", 1)  # one at a time
+    app.on_error_menu.set(core.STOP_ON_ERROR)
+
+    app.queue_downloads(
         ["https://a", "https://b", "https://c"],
-        {"https://a": "Read timed out."},
-        stop=True,
+        core.VIDEO,
+        None,
+        "Best",
+        job=quick_job({"https://a": "Read timed out."}),
     )
+    assert wait_until(finished(app))
 
-    assert app.failed_links == ["https://a", "https://b", "https://c"]
-    assert "internet" in app.status_label.text()
-    assert app.retry_button.text() == "Retry 3 failed"
-
-
-def test_all_ok_shows_done_and_open_folder(app):
-    run_downloads(app, ["https://a"], {})
-    assert app.status_label.text().startswith("✓  Done. 1 file saved")
-    assert shown(app.open_folder_button)
-    assert not shown(app.retry_button)
+    errors = {t.url: t.error for t in app.history}
+    assert "internet" in errors["https://a"]
+    assert errors["https://b"] == "Not downloaded: stopped after an error."
+    assert errors["https://c"] == "Not downloaded: stopped after an error."
 
 
-def test_progress_from_the_download_thread_reaches_the_window(app):
-    app.is_downloading = True
-    thread = threading.Thread(
-        target=app.progress_hook,
-        args=(
+def test_progress_from_the_download_thread_reaches_the_row(app):
+    gate = threading.Event()
+
+    def job(task):
+        # Like yt-dlp: progress reported from the download thread
+        app.progress_hook(
+            task,
             {
                 "status": "downloading",
                 "downloaded_bytes": 50,
                 "total_bytes": 100,
                 "speed": 1000,
+                "eta": 65,
             },
-        ),
-    )
-    thread.start()
-    thread.join()
-
-    assert wait_until(lambda: app.status_label.text() == "Downloading 50%")
-    assert "/s" in app.speed_label.text()
-    assert app.progress.value() == 500
-
-
-def test_pause_resume_and_cancel(app):
-    """Pause blocks the download thread; Resume lets it go on; Cancel while
-    paused stops it cleanly."""
-
-    progress = []
-
-    def job(url, options):
-        # A "download" that keeps going until it's cancelled (max ~30 s), so the
-        # test controls the timing instead of racing a fast loop
-        for _ in range(30_000):
-            app.progress_hook(
-                {"status": "downloading", "downloaded_bytes": 1, "total_bytes": 100}
-            )
-            progress.append(1)
-            time.sleep(0.001)
+        )
+        gate.wait(5)
         return 1
 
-    app.is_downloading = True
-    app.update_main_button()
-    thread = threading.Thread(
-        target=app.download_all, args=(["https://a"], job, {}, "file", False)
-    )
+    [task] = app.queue_downloads(["https://a"], core.VIDEO, None, "Best", job=job)
 
-    app.toggle_pause()  # paused before it even starts
-    assert app.main_button.text() == "Resume"
-    assert app.progress.isPaused()
-    thread.start()
+    assert wait_until(lambda: task.status.startswith("50%"))
+    assert "50 B of 100 B" in task.status
+    assert "1 KB/s" in task.status
+    assert "1:05 left" in task.status
+    row = app.current_rows[task.id]
+    assert row.progress.value() == 500
+    assert row.status.text() == task.status
+
+    gate.set()
+    assert wait_until(finished(app))
+
+
+def test_pause_resume_and_cancel_one_download(app):
+    """Pause blocks that download's thread; Resume lets it go on; Cancel while
+    paused stops it cleanly and it shows as cancelled in Recent."""
+
+    slow = SlowJob(app)
+    [task] = app.queue_downloads(["https://a"], core.VIDEO, None, "Best", job=slow)
+    assert wait_until(lambda: slow.steps)
+
+    app.toggle_pause(task)
+    assert task.state == "paused"
+    row = app.current_rows[task.id]
+    assert row.progress.isPaused()
+    assert row.buttons["pause"].toolTip() == "Resume"
+    pump(0.1)
+    steps = len(slow.steps)
     pump(0.3)
-    assert progress == []  # nothing happens while paused
+    assert len(slow.steps) <= steps + 1  # nothing happens while paused
 
-    app.toggle_pause()  # resume
-    assert wait_until(lambda: len(progress) > 0)
+    app.toggle_pause(task)
+    assert wait_until(lambda: len(slow.steps) > steps + 1)
 
-    app.toggle_pause()  # pause again, then cancel
-    app.cancel_download()
-    assert wait_until(lambda: not app.is_downloading)
-    assert app.status_label.text().startswith("Download cancelled")
-    assert app.main_button.text() == "Download"
-    assert not shown(app.cancel_button)
-    thread.join(2)
-    assert not thread.is_alive()
+    app.toggle_pause(task)  # pause again, then cancel
+    app.cancel_task(task)
+    assert wait_until(finished(app))
+    assert app.history[0] is task
+    assert task.state == "cancelled"
+    assert "retry" in app.recent_rows[task.id].visible_buttons()
+
+
+def test_cancel_a_download_that_is_still_waiting(app, monkeypatch):
+    monkeypatch.setattr("ui.window.MAX_PARALLEL", 1)
+    slow = SlowJob(app)
+    first, second = app.queue_downloads(
+        ["https://a", "https://b"], core.VIDEO, None, "Best", job=slow
+    )
+    assert second.state == "queued"
+
+    app.cancel_task(second)
+    assert second.state == "cancelled"
+    assert app.tasks == [first]
+
+    slow.release.set()
+    assert wait_until(finished(app))
+
+
+def test_recent_downloads_are_remembered_after_a_restart(app, tmp_path):
+    app.queue_downloads(["https://a"], core.AUDIO, None, "Best", job=quick_job())
+    assert wait_until(finished(app))
+    app.history[0].title = "Song"
+    from ui.downloads import save_history
+
+    save_history(app.history)
+
+    from ui.window import VideoDownloader
+
+    again = VideoDownloader()
+    try:
+        [task] = again.history
+        assert (task.url, task.title, task.state) == ("https://a", "Song", "done")
+        assert again.recent_rows[task.id].meta.text() == "Audio  ·  MP3"
+        assert again.recent_empty.isHidden()
+    finally:
+        again.deleteLater()
+        pump(0.05)
+
+
+def test_remove_and_clear_recent_downloads(app):
+    app.queue_downloads(
+        ["https://a", "https://b"], core.VIDEO, None, "Best", job=quick_job()
+    )
+    assert wait_until(finished(app))
+
+    app.remove_task(app.history[0])
+    assert len(app.history) == 1
+    assert len(app.recent_rows) == 1
+
+    app.clear_history()
+    assert app.history == []
+    assert shown(app.recent_empty)
+
+
+def test_open_button_only_when_the_file_is_there(app, tmp_path):
+    saved = tmp_path / "video.mp4"
+    saved.write_bytes(b"x" * 10)
+
+    def job(task):
+        task.path = str(saved) if task.url == "https://a" else str(tmp_path / "gone")
+        return 1
+
+    app.queue_downloads(["https://a", "https://b"], core.VIDEO, None, "Best", job=job)
+    assert wait_until(finished(app))
+
+    tasks = {t.url: t for t in app.history}
+    assert tasks["https://a"].size == 10
+    assert "open" in app.recent_rows[tasks["https://a"].id].visible_buttons()
+    assert "open" not in app.recent_rows[tasks["https://b"].id].visible_buttons()
 
 
 # ---------- settings ----------
+
+
+def test_sidebar_has_home_downloads_and_settings(app):
+    names = [
+        app.navigationInterface.widget(page.objectName()).text()
+        for page in (app.home_page, app.downloads_page, app.settings_page)
+    ]
+    assert names == ["Home", "Downloads", "Settings"]
+
+    app.show_downloads()
+    assert app.stackedWidget.currentWidget() is app.downloads_page
+    assert shown(app.current_empty)  # "Nothing is downloading"
+    app.focus_links()
+    assert app.stackedWidget.currentWidget() is app.home_page
 
 
 def test_settings_page_opens_and_closes(app):
@@ -400,7 +565,10 @@ def test_update_banner_only_for_newer_versions(app):
 
 
 def test_update_waits_for_running_download(app):
+    slow = SlowJob(app)
+    app.queue_downloads(["https://a"], core.VIDEO, None, "Best", job=slow)
     app.update_release = {"version": "99.0.0"}
-    app.is_downloading = True
     app.start_update()
     assert "Finish or cancel" in app.update_label.text()
+    slow.release.set()
+    assert wait_until(finished(app))

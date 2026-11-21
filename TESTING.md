@@ -33,7 +33,7 @@ Tests also run automatically on GitHub for every push (Actions → **tests**).
 |---|---|---|
 | Unit | `test_titles.py`, `test_errors.py`, `test_formats.py`, `test_checks.py` | Title cleaning, error messages, qualities and sizes, link, folder and space checks, version compare |
 | Integration (faked network) | `test_photos_and_updates.py` | Photo posts (gallery-dl output), update check, update download and checksum |
-| UI | `test_app.py` | The real window (drawn off-screen): preview, modes, quality, pause/resume/cancel, skip/stop on errors, retry, settings, update banner, fits a 1366×768 screen |
+| UI | `test_app.py` | The real window (drawn off-screen): preview, modes, quality, Home → Downloads queue (3 at once), pause/resume/cancel per download, skip/stop on errors, retry, recent downloads kept after restart, settings, update banner, fits a 1366×768 screen |
 | Live (opt-in) | `test_live.py` | Real YouTube lookup, thumbnail and download |
 | Manual | checklist below | Installer, real sites, sign-in, things that need a person |
 
@@ -84,6 +84,13 @@ Do this on the **installed** app (`release\VideoDownloader-Setup-x.y.z.exe`), id
 - [ ] A line that isn't a link is reported before anything starts.
 - [ ] Save folder on a full USB stick or a read-only folder gives a clear message.
 - [ ] Pause for a minute, then Resume continues. Cancel while paused works.
+
+**Downloads page**
+- [ ] Download on Home: it says "Download started", **Go to Downloads** opens the page, and Home is empty for the next link.
+- [ ] Five links at once: 3 download, 2 wait; the sidebar badge counts them.
+- [ ] A finished download: ▶ opens the file, the folder button shows it selected in File Explorer.
+- [ ] Close and reopen the app: Recent downloads are still listed. **Clear list** keeps the files.
+- [ ] Updating 1.1.1 → 2.0.0 with the installer: the app works, settings are kept, and no CustomTkinter / tcl folders are left in the install folder.
 - [ ] Download, cancel, paste another link: the preview and thumbnail show (BUG-001).
 - [ ] ⚙ Settings → Open error log opens the log.
 

@@ -83,8 +83,7 @@ def app(qapp, tmp_path, monkeypatch):
     yield window
 
     # Stop anything still running, then throw the window away
-    window.cancel_requested = True
-    window.is_downloading = False
-    window.resume_event.set()
+    window.cancel_all()
+    wait_until(lambda: not any(task.running for task in window.tasks), timeout=3)
     window.deleteLater()
     pump(0.05)
