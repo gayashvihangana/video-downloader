@@ -2,7 +2,14 @@
 
 import pytest
 
-from core import analyse_formats, human_size, human_time, quality_text, summarize_video
+from core import (
+    analyse_formats,
+    human_size,
+    human_time,
+    quality_name,
+    quality_text,
+    summarize_video,
+)
 
 AUDIO_M4A = {
     "vcodec": "none",
@@ -57,6 +64,46 @@ def test_vertical_video_is_named_by_its_short_side():
     [quality] = analyse_formats({"formats": formats}, False)
     assert quality["label"] == "1080p"
     assert quality["height"] == 1920  # the real height is used for downloading
+
+
+def test_wide_video_uses_standard_names_not_its_pixel_height():
+    """A cinema-shaped video (like the screenshot: 804p, 536p, 358p...) is
+    named the way YouTube does: 1080p, 720p, 480p."""
+
+    formats = [
+        video(858, 2048, "webm"),
+        video(804, 1920),
+        video(536, 1280),
+        video(358, 858),
+        video(268, 640),
+        video(178, 426),
+        video(128, 306),
+    ]
+    qualities = analyse_formats({"formats": formats}, False)
+
+    # 2048x858 and 1920x804 are both 1080p (as on YouTube): one menu entry
+    assert labels(qualities) == ["1080p", "720p", "480p", "360p", "240p", "144p"]
+    # The real height still picks the file (the MP4 one, as before)
+    assert qualities[0]["height"] == 804
+
+
+@pytest.mark.parametrize(
+    ("width", "height", "name"),
+    [
+        (1920, 1080, "1080p"),
+        (1918, 1078, "1080p"),  # a few pixels short still counts
+        (1440, 1080, "1080p"),  # 4:3
+        (1080, 1080, "1080p"),  # square (Instagram)
+        (1080, 1350, "1080p"),  # 4:5 portrait (Instagram)
+        (720, 1280, "720p"),  # vertical (Shorts, TikTok)
+        (576, 1024, "576p"),
+        (3840, 1608, "2160p (4K)"),
+        (7680, 4320, "4320p (8K)"),
+        (None, 720, "720p"),  # width unknown
+    ],
+)
+def test_quality_names(width, height, name):
+    assert quality_name(width, height) == name
 
 
 def test_watermarked_storyboard_and_audio_only_are_never_offered():

@@ -176,7 +176,9 @@ class VideoDownloader(FluentWindow):
         self.quality_list = []
         self.photo_cache = {}  # url -> (photos, post details)
         self.thumbnail_image = None
-        self.preferred_height = None  # height the user picked; kept per link
+        # Quality the user picked ("1080p"), kept for the next links
+        self.preferred_quality = None
+        self.quality_names = {}  # menu text -> "1080p"
 
         # Sign-in
         self.cookie_file = self.settings.get("cookie_file")
@@ -1212,7 +1214,7 @@ class VideoDownloader(FluentWindow):
 
     def on_quality_change(self, value):
 
-        self.preferred_height = self.qualities.get(value)
+        self.preferred_quality = self.quality_names.get(value)
 
     def set_quality_choices(self, qualities):
 
@@ -1244,16 +1246,22 @@ class VideoDownloader(FluentWindow):
 
         if not qualities:
             self.qualities = {BEST_QUALITY: None}
+            self.quality_names = {}
             self.quality.set_values([BEST_QUALITY], BEST_QUALITY)
             return
 
-        # Keep the chosen height if this video has it too (the height the
-        # user picked, not the menu's text: that's "Checking…" while loading)
-        previous_height = self.preferred_height
+        # Keep the chosen quality if this video has it too. By name, not
+        # pixels: 1080p is 1920x1080 on one video and 1920x804 on another.
+        # (Not the menu's text either: that's "Checking…" while loading.)
+        previous = self.preferred_quality
         everywhere = self.plays_everywhere()
 
+        # Menu text -> the real height, which picks the file to download
         self.qualities = {
             core.quality_text(q, everywhere): q["height"] for q in qualities
+        }
+        self.quality_names = {
+            core.quality_text(q, everywhere): q["label"] for q in qualities
         }
 
         # Default: the best quality that needs no converting (in "plays
@@ -1266,7 +1274,7 @@ class VideoDownloader(FluentWindow):
         default = (no_convert or list(self.qualities))[0]
 
         choice = next(
-            (text for text, h in self.qualities.items() if h == previous_height),
+            (text for text, name in self.quality_names.items() if name == previous),
             default,
         )
         self.quality.set_values(list(self.qualities), choice)

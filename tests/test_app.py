@@ -108,6 +108,26 @@ def test_quality_menu_lists_sizes_and_remembers_height(app):
     assert app.quality.get() == "360p  ·  ~3.0 MB"  # same height kept
 
 
+def test_chosen_quality_is_kept_by_name_across_video_shapes(app):
+    """1080p picked on a wide video (really 804 pixels high) stays 1080p on a
+    normal 1920x1080 video."""
+
+    def qualities(height_1080, height_720):
+        return [
+            {"label": "1080p", "height": height_1080, "size": 0, "approx": True},
+            {"label": "720p", "height": height_720, "size": 0, "approx": True},
+        ]
+
+    show(app, lookup_result("https://a", "Wide", qualities=qualities(804, 536)))
+    app.quality.set("720p")
+    app.on_quality_change("720p")
+    assert app.qualities["720p"] == 536
+
+    show(app, lookup_result("https://b", "Normal", qualities=qualities(1080, 720)))
+    assert app.quality.get() == "720p"
+    assert app.qualities[app.quality.get()] == 720  # downloads the real height
+
+
 def test_only_available_modes_are_offered(app):
     show(
         app,
