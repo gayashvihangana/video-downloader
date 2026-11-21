@@ -669,6 +669,35 @@ def format_size(fmt, duration):
     return 0, True
 
 
+STANDARD_HEIGHTS = (144, 240, 360, 480, 540, 576, 720, 1080, 1440, 2160, 4320)
+
+
+def quality_name(width, height):
+    """The standard name for a resolution ("1080p"), the way YouTube names it.
+
+    Wide videos are shorter than their quality: a cinema-shaped 1920x804 is
+    1080p, not "804p". So each size is compared with the 16:9 picture it
+    fills (by width or height, whichever is bigger), and named after the
+    biggest standard size it reaches. Vertical videos (Shorts) are measured
+    the same way, turned sideways.
+    """
+
+    width = width or height
+    long_side, short_side = max(width, height), min(width, height)
+    fills = max(short_side, long_side * 9 / 16)
+
+    # A few pixels short of a standard size still counts (1918x1078 is 1080p)
+    reached = [h for h in STANDARD_HEIGHTS if h <= fills * 1.03]
+    standard = reached[-1] if reached else round(short_side)
+
+    label = f"{standard}p"
+    if standard >= 4320:
+        label += " (8K)"
+    elif standard >= 2160:
+        label += " (4K)"
+    return label
+
+
 def analyse_formats(info, need_audio_in_file):
     """Qualities the video really has, best first, with estimated sizes.
 
@@ -712,13 +741,7 @@ def analyse_formats(info, need_audio_in_file):
         if need_audio_in_file and not has_audio:
             continue
 
-        # Name by the short side, so vertical videos (Shorts) read normally
-        short_side = min(height, fmt.get("width") or height)
-        label = f"{short_side}p"
-        if short_side >= 4320:
-            label += " (8K)"
-        elif short_side >= 2160:
-            label += " (4K)"
+        label = quality_name(fmt.get("width"), height)
 
         size, approx = format_size(fmt, duration)
         if not has_audio and best_audio:
