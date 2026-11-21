@@ -1,15 +1,18 @@
 """The main window: a Fluent (Windows 11 style) app with a sidebar.
 
-Pages: Download (home) and Settings. Background threads never touch widgets;
-they hand work to the UI thread with self.ui(...).
+Pages: Home (paste links, start downloads), Downloads (current and recent)
+and Settings. Background threads never touch widgets; they hand work to the
+UI thread with self.ui(...).
 """
 
+import itertools
 import json
 import os
 import re
 import shutil
 import subprocess
 import threading
+import time
 
 import yt_dlp
 from PySide6.QtCore import QObject, QSignalBlocker, QSize, Qt, QTimer, Signal
@@ -31,6 +34,8 @@ from qfluentwidgets import (
     HyperlinkButton,
     IconWidget,
     IndeterminateProgressBar,
+    InfoBadge,
+    InfoBadgePosition,
     InfoBar,
     InfoBarPosition,
     MessageBox,
@@ -38,7 +43,6 @@ from qfluentwidgets import (
     PlainTextEdit,
     PrimaryPushButton,
     PrimaryPushSettingCard,
-    ProgressBar,
     PushButton,
     PushSettingCard,
     ScrollArea,
@@ -46,6 +50,7 @@ from qfluentwidgets import (
     SettingCardGroup,
     SimpleCardWidget,
     StrongBodyLabel,
+    SubtitleLabel,
     TitleLabel,
     ToolTipFilter,
     TransparentPushButton,
@@ -85,6 +90,18 @@ from core import (
 )
 
 from . import theme
+from .downloads import (
+    CANCELLED,
+    DONE,
+    DOWNLOADING,
+    FAILED,
+    PAUSED,
+    QUEUED,
+    DownloadRow,
+    DownloadTask,
+    load_history,
+    save_history,
+)
 from .theme import BAD, GOOD, MUTED, WARN, paint
 from .widgets import (
     Banner,
@@ -97,6 +114,7 @@ from .widgets import (
 )
 
 CONTENT_WIDTH = 860  # pages stay readable on wide screens
+MAX_PARALLEL = 3  # downloads running at once; the rest wait their turn
 
 
 class Dispatcher(QObject):
@@ -186,20 +204,11 @@ class VideoDownloader(FluentWindow):
         self.sign_in_request = 0
         self.sign_in_site = None
 
-        # Download state
-        self.is_downloading = False
-        self.cancel_requested = False
-        self.helper_process = None
-        self.current_item = (0, 0)  # (index, total)
-        self.last_fraction = 0
-
-        # Pause: the download thread waits while this event is cleared
-        self.paused = False
-        self.resume_event = threading.Event()
-        self.resume_event.set()
-
-        # Links that failed in the last run (for "Retry failed")
-        self.failed_links = []
+        # Downloads: running/waiting ones, and finished ones (newest first)
+        self.tasks = []
+        self.history = load_history()
+        self.batches = itertools.count(1)
+        self.downloads_badge = None
         self.update_release = None
 
         # Work handed from background threads to the UI thread (see ui())
@@ -283,9 +292,11 @@ class VideoDownloader(FluentWindow):
             self.setWindowIcon(QIcon(core.ICON_FILE))
 
         self.home_page = self.create_home_page()
+        self.downloads_page = self.create_downloads_page()
         self.settings_page = self.create_settings_page()
 
-        self.addSubInterface(self.home_page, FluentIcon.DOWNLOAD, "Download")
+        self.addSubInterface(self.home_page, FluentIcon.HOME, "Home")
+        self.addSubInterface(self.downloads_page, FluentIcon.DOWNLOAD, "Downloads")
         self.navigationInterface.addItem(
             routeKey="theme",
             icon=FluentIcon.CONSTRACT,
@@ -315,21 +326,21 @@ class VideoDownloader(FluentWindow):
 
         # Keyboard shortcuts
         shortcuts = {
-            "Ctrl+Return": self.on_main_button,
-            "Escape": self.cancel_download,
-            "Ctrl+P": self.toggle_pause,
-            "Ctrl+L": lambda: self.url_box.setFocus(),
+            "Ctrl+Return": self.start_download,
+            "Ctrl+L": self.focus_links,
+            "Ctrl+J": self.show_downloads,  # as in web browsers
         }
         for keys, action in shortcuts.items():
             QShortcut(QKeySequence(keys), self, action)
 
         self.update_main_button()
+        self.refresh_downloads()
 
     def create_home_page(self):
 
         area, layout = page("home")
 
-        title = TitleLabel("Download", area)
+        title = TitleLabel("New download", area)
         subtitle = muted(
             CaptionLabel(
                 "Videos, music and photos from YouTube, TikTok, Instagram and "
@@ -386,7 +397,9 @@ class VideoDownloader(FluentWindow):
         row.addWidget(paste)
         row.addWidget(clear)
         row.addStretch(1)
-        row.addWidget(muted(CaptionLabel("Ctrl+Enter to download", widget)))
+        row.addWidget(
+            muted(CaptionLabel("Ctrl+Enter to download  ·  Ctrl+J downloads", widget))
+        )
 
         inner.addLayout(row)
         layout.addWidget(widget)
@@ -482,7 +495,8 @@ class VideoDownloader(FluentWindow):
         actions = QHBoxLayout()
         actions.setSpacing(10)
 
-        # Download  ->  while downloading: Pause / Resume
+        # Always "Download": downloads run on the Downloads page, so Home is
+        # free for the next link straight away
         self.main_button = PrimaryPushButton(FluentIcon.DOWNLOAD, "Download")
         self.main_button.setFixedHeight(44)
         font = self.main_button.font()
@@ -490,46 +504,27 @@ class VideoDownloader(FluentWindow):
         font.setBold(True)
         self.main_button.setFont(font)
         self.main_button.setIconSize(QSize(18, 18))
-        self.main_button.clicked.connect(self.on_main_button)
+        self.main_button.clicked.connect(self.start_download)
         actions.addWidget(self.main_button, 1)
-
-        # Only shown while downloading; smaller, so it's harder to hit by mistake
-        self.cancel_button = PushButton(FluentIcon.CLOSE, "Cancel")
-        self.cancel_button.setFixedSize(120, 44)
-        self.cancel_button.clicked.connect(self.cancel_download)
-        self.cancel_button.hide()
-        actions.addWidget(self.cancel_button)
 
         layout.addSpacing(2)
         layout.addLayout(actions)
 
-        # Progress / result (hidden until a download starts)
-        self.status_area, status = card(spacing=10, margins=(20, 16, 20, 16))
+        # "Download started" (with a way to the Downloads page), or what to
+        # fix before downloading. Hidden until then.
+        self.status_area, status = card(
+            QHBoxLayout, spacing=12, margins=(20, 14, 14, 14)
+        )
 
-        top = QHBoxLayout()
         self.status_label = BodyLabel(self.status_area)
         self.status_label.setWordWrap(True)
-        top.addWidget(self.status_label, 1)
-        self.speed_label = muted(CaptionLabel(self.status_area))
-        top.addWidget(self.speed_label, 0, Qt.AlignmentFlag.AlignTop)
-        status.addLayout(top)
+        status.addWidget(self.status_label, 1)
 
-        self.progress = ProgressBar(self.status_area)
-        self.progress.setRange(0, 1000)
-        status.addWidget(self.progress)
-
-        buttons = QHBoxLayout()
-        buttons.addStretch(1)
-        # Shown after a run where some links failed
-        self.retry_button = PushButton(FluentIcon.SYNC, "Retry failed")
-        self.retry_button.clicked.connect(self.retry_failed)
-        self.retry_button.hide()
-        self.open_folder_button = PushButton(FluentIcon.FOLDER, "Open folder")
-        self.open_folder_button.clicked.connect(self.open_folder)
-        self.open_folder_button.hide()
-        buttons.addWidget(self.retry_button)
-        buttons.addWidget(self.open_folder_button)
-        status.addLayout(buttons)
+        self.go_to_downloads_button = PushButton(
+            FluentIcon.RIGHT_ARROW, "Go to Downloads", self.status_area
+        )
+        self.go_to_downloads_button.clicked.connect(self.show_downloads)
+        status.addWidget(self.go_to_downloads_button, 0, Qt.AlignmentFlag.AlignTop)
 
         self.status_area.hide()
         layout.addWidget(self.status_area)
@@ -561,6 +556,91 @@ class VideoDownloader(FluentWindow):
 
         layout.addLayout(footer)
         self.show_folder()
+
+    def create_downloads_page(self):
+        """Current downloads (with progress) and recent ones (to open)."""
+
+        area, layout = page("downloads")
+        layout.setSpacing(10)
+
+        head = QHBoxLayout()
+        head.addWidget(TitleLabel("Downloads", area))
+        head.addStretch(1)
+        open_folder = PushButton(FluentIcon.FOLDER, "Open folder", area)
+        open_folder.clicked.connect(self.open_folder)
+        head.addWidget(open_folder, 0, Qt.AlignmentFlag.AlignVCenter)
+        layout.addLayout(head)
+        layout.addSpacing(6)
+
+        actions = {
+            "pause": self.toggle_pause,
+            "cancel": self.cancel_task,
+            "open": self.open_task_file,
+            "folder": self.show_task_in_folder,
+            "retry": self.retry_task,
+            "remove": self.remove_task,
+        }
+        self.row_actions = actions
+
+        # --- Current ---
+        current_head = QHBoxLayout()
+        self.current_title = SubtitleLabel("Current downloads", area)
+        current_head.addWidget(self.current_title)
+        current_head.addStretch(1)
+        layout.addLayout(current_head)
+
+        self.current_list = QVBoxLayout()
+        self.current_list.setSpacing(8)
+        layout.addLayout(self.current_list)
+        self.current_rows = {}  # task id -> row
+
+        self.current_empty, empty = card(
+            QHBoxLayout, margins=(20, 16, 14, 16), spacing=12
+        )
+        empty.addWidget(
+            muted(
+                BodyLabel(
+                    "Nothing is downloading. Paste a link on Home to start.",
+                    self.current_empty,
+                )
+            ),
+            1,
+        )
+        go_home = PushButton(FluentIcon.HOME, "Go to Home", self.current_empty)
+        go_home.clicked.connect(self.focus_links)
+        empty.addWidget(go_home)
+        layout.addWidget(self.current_empty)
+
+        layout.addSpacing(16)
+
+        # --- Recent ---
+        recent_head = QHBoxLayout()
+        self.recent_title = SubtitleLabel("Recent downloads", area)
+        recent_head.addWidget(self.recent_title)
+        recent_head.addStretch(1)
+        self.retry_all_button = PushButton(FluentIcon.SYNC, "Retry failed", area)
+        self.retry_all_button.clicked.connect(self.retry_all_failed)
+        recent_head.addWidget(self.retry_all_button)
+        self.clear_history_button = HyperlinkButton(area)
+        self.clear_history_button.setText("Clear list")
+        self.clear_history_button.setToolTip("Your files stay where they are")
+        self.clear_history_button.clicked.connect(self.clear_history)
+        recent_head.addWidget(self.clear_history_button)
+        layout.addLayout(recent_head)
+
+        self.recent_list = QVBoxLayout()
+        self.recent_list.setSpacing(8)
+        layout.addLayout(self.recent_list)
+        self.recent_rows = {}
+
+        self.recent_empty = muted(
+            BodyLabel("Downloads you finish will show up here.", area)
+        )
+        self.recent_empty.setContentsMargins(4, 4, 4, 4)
+        layout.addWidget(self.recent_empty)
+
+        layout.addStretch(1)
+        return area
 
     def create_settings_page(self):
         """Less-used options live on their own page, so the main screen
@@ -703,6 +783,15 @@ class VideoDownloader(FluentWindow):
 
         self.switchTo(self.home_page)
 
+    def show_downloads(self):
+
+        self.switchTo(self.downloads_page)
+
+    def focus_links(self):
+
+        self.show_home()
+        self.url_box.setFocus()
+
     def toggle_settings(self):
 
         if self.stackedWidget.currentWidget() is self.settings_page:
@@ -843,21 +932,6 @@ class VideoDownloader(FluentWindow):
             os.startfile(self.download_folder)
 
     def update_main_button(self):
-
-        if self.is_downloading:
-            if self.paused:
-                self.main_button.setText("Resume")
-                self.main_button.setIcon(FluentIcon.PLAY)
-            else:
-                self.main_button.setText("Pause")
-                self.main_button.setIcon(FluentIcon.PAUSE)
-
-            self.main_button.setEnabled(True)
-            self.cancel_button.setEnabled(not self.cancel_requested)
-            self.cancel_button.show()
-            return
-
-        self.cancel_button.hide()
 
         urls = self.get_urls()
         count = len(urls)
@@ -1430,53 +1504,19 @@ class VideoDownloader(FluentWindow):
     # DOWNLOAD
     # -------------------------------
 
-    def on_main_button(self):
+    @property
+    def is_downloading(self):
+        """Is anything running or waiting to run?"""
 
-        if self.is_downloading:
-            self.toggle_pause()
-        else:
-            self.start_download()
+        return any(task.active for task in self.tasks)
 
-    # -------------------------------
-    # PAUSE / RESUME
-    # -------------------------------
+    def get_download_options(self, mode=None, height=...):
+        """yt-dlp options for a video / audio download. Without arguments it
+        uses what's chosen in the window."""
 
-    def toggle_pause(self):
-
-        if not self.is_downloading or self.cancel_requested:
-            return
-
-        self.paused = not self.paused
-
-        if self.paused:
-            self.resume_event.clear()  # the download thread waits at its next step
-            core.set_process_paused(self.helper_process, True)
-
-            self.progress.pause()
-            self.speed_label.setText("")
-            self.show_status(
-                f"{self.item_prefix()}Paused at {self.last_fraction:.0%}", MUTED
-            )
-        else:
-            core.set_process_paused(self.helper_process, False)
-            self.resume_event.set()
-
-            self.progress.resume()
-            self.show_status(f"{self.item_prefix()}Resuming…", MUTED)
-
-        self.update_main_button()
-
-    def wait_while_paused(self):
-        """Called from the download thread: block here while paused."""
-
-        while not self.resume_event.wait(0.2):
-            if self.cancel_requested:
-                break
-
-        if self.cancel_requested:
-            raise DownloadCancelled()
-
-    def get_download_options(self):
+        mode = mode or self.mode.get()
+        if height is ...:
+            height = self.qualities.get(self.quality.get())
 
         options = self.ydl_options()
 
@@ -1487,12 +1527,11 @@ class VideoDownloader(FluentWindow):
                 "outtmpl": os.path.join(
                     self.download_folder, "%(title).90B [%(id)s].%(ext)s"
                 ),
-                "progress_hooks": [self.progress_hook],
                 "windowsfilenames": True,
             }
         )
 
-        if self.mode.get() == AUDIO:
+        if mode == AUDIO:
             options["format"] = "bestaudio/best"
             options["postprocessors"] = [
                 {
@@ -1502,9 +1541,6 @@ class VideoDownloader(FluentWindow):
                 }
             ]
             return options
-
-        # Exact pixel height of the chosen quality (None = best available)
-        height = self.qualities.get(self.quality.get())
 
         if self.plays_everywhere():
             # At the chosen size, prefer H.264 + AAC (plays everywhere). If a
@@ -1586,125 +1622,404 @@ class VideoDownloader(FluentWindow):
 
         return links, problems
 
-    def retry_failed(self):
+    def start_download(self):
+        """Download button: queue the links, then clear Home for the next ones."""
 
-        if self.failed_links and not self.is_downloading:
-            self.start_download(self.failed_links)
-
-    def start_download(self, links=None):
-
-        if self.is_downloading:
-            return
-
-        urls = links or self.get_urls()
+        urls = self.get_urls()
 
         if not urls:
             self.url_box.setFocus()
             return
 
-        mode = self.mode.get()
-
         # Catch problems now, not halfway through (wrong lines, folder, space)
         urls, problems = self.preflight(urls)
 
         if problems:
-            self.retry_button.hide()
-            self.open_folder_button.hide()
-            self.progress.setValue(0)
-            self.progress.setError(True)
-            self.speed_label.setText("")
             self.show_status("\n".join(f"•  {p}" for p in problems), BAD)
             return
 
-        self.failed_links = []
-        self.retry_button.hide()
-        self.is_downloading = True
-        self.cancel_requested = False
-        self.paused = False
-        self.resume_event.set()
-        self.last_fraction = 0
+        mode = self.mode.get()
+        height = self.qualities.get(self.quality.get()) if mode == VIDEO else None
+        quality = self.quality_names.get(self.quality.get(), "Best")
 
-        self.update_main_button()
-        self.open_folder_button.hide()
-        self.progress.setError(False)
-        self.progress.resume()
-        self.progress.setValue(0)
-        self.show_status("Starting…", MUTED)
+        # What the preview already knows about the first link
+        details = {}
+        lookup = self.lookup or {}
+        if lookup.get("url") in urls and not lookup.get("error"):
+            details[lookup["url"]] = {
+                "title": lookup.get("title"),
+                "site": lookup.get("site"),
+                "thumbnail": lookup.get("thumbnail"),
+                "thumbnail_url": lookup.get("thumbnail_url"),
+            }
 
-        # Read widget values here: widgets must only be touched on the UI thread
-        if mode == PHOTOS:
-            job, options = self.download_photo_link, self.gallery_cookie_args()
-            kind = "photo"
-        else:
-            job, options = self.download_video_link, self.get_download_options()
-            kind = "file"
+        tasks = self.queue_downloads(urls, mode, height, quality, details)
+        self.show_started(tasks)
 
+        # Ready for the next link
+        self.url_box.clear()
+        self.url_box.setFocus()
+
+    def queue_downloads(self, urls, mode, height, quality, details=None, job=None):
+        """Add one download per link; up to MAX_PARALLEL run at once.
+
+        job(task) -> files saved. Normally picked from the mode (tests pass
+        their own)."""
+
+        details = details or {}
+        batch = next(self.batches)
         stop_on_error = self.on_error_menu.get() == STOP_ON_ERROR
 
-        threading.Thread(
-            target=self.download_all,
-            args=(urls, job, options, kind, stop_on_error),
-            daemon=True,
-        ).start()
+        # Read settings here: widgets must only be touched on the UI thread
+        if mode == PHOTOS:
+            job, options = job or self.download_photos, self.gallery_cookie_args()
+        else:
+            job = job or self.download_video_link
+            options = self.get_download_options(mode, height)
 
-    def cancel_download(self):
+        tasks = []
+        for url in urls:
+            task = DownloadTask(url, mode, height, quality, **details.get(url, {}))
+            task.job, task.options = job, options
+            task.batch, task.stop_on_error = batch, stop_on_error
+            self.tasks.append(task)
+            tasks.append(task)
 
-        if not self.is_downloading or self.cancel_requested:
-            return
+        self.refresh_downloads()
+        self.start_next_downloads()
+        return tasks
 
-        self.cancel_requested = True
-        self.show_status("Cancelling…", MUTED)
-        self.update_main_button()
+    def start_next_downloads(self):
 
-        # Wake a paused download so it can stop
-        self.resume_event.set()
+        running = sum(1 for task in self.tasks if task.running)
 
-        if self.helper_process and self.helper_process.poll() is None:
-            core.set_process_paused(self.helper_process, False)
-            self.helper_process.terminate()
+        for task in self.tasks:
+            if running >= MAX_PARALLEL:
+                break
 
-    def download_all(self, urls, job, options, kind, stop_on_error):
-        """Download each link in turn (runs on a background thread)."""
+            if task.state == QUEUED and not task.running:
+                task.running = True
+                task.state = DOWNLOADING
+                task.status = "Starting…"
+                running += 1
+                threading.Thread(
+                    target=self.run_task, args=(task,), daemon=True
+                ).start()
+                self.refresh_row(task)
 
-        saved, failed = 0, []  # failed: [(link, reason)]
+    def run_task(self, task):
+        """Download one link (runs on a background thread)."""
+
+        saved, error = 0, None
 
         try:
-            for index, url in enumerate(urls):
-                if self.cancel_requested:
-                    break
+            saved = task.job(task)
 
-                self.current_item = (index + 1, len(urls))
-
-                try:
-                    saved += job(url, options)
-
-                except Exception as error:
-                    if self.cancel_requested:
-                        break
-
-                    log.warning("Download failed for %s: %s", url, error)
-                    failed.append((url, core.friendly_error(error)))
-
-                    if stop_on_error:
-                        # The rest weren't tried: offer them in "Retry" too
-                        for skipped in urls[index + 1 :]:
-                            failed.append(
-                                (skipped, "Not downloaded: stopped after an error.")
-                            )
-                        break
-
-        except Exception:
-            # Our own bug: report it instead of leaving the app "downloading"
-            log.exception("Download loop crashed")
-            failed.append(("", "Something went wrong. Details were saved to the log."))
+        except Exception as problem:
+            if not task.cancel_requested:
+                log.warning("Download failed for %s: %s", task.url, problem)
+                error = core.friendly_error(problem)
 
         finally:
-            self.ui(self.download_finished, saved, failed, kind)
+            self.ui(self.task_finished, task, saved, error)
 
-    def download_video_link(self, url, options):
+    def task_finished(self, task, saved, error):
 
-        options = dict(options)
+        task.running = False
+        task.helper_process = None
+        task.saved = saved
+        task.finished_at = time.time()
+
+        if task.cancel_requested:
+            task.state = CANCELLED
+        elif error:
+            task.state, task.error = FAILED, error
+        else:
+            task.state, task.fraction = DONE, 1.0
+            if task.path and os.path.isfile(task.path):
+                task.size = os.path.getsize(task.path)
+
+        self.move_to_history(task)
+
+        # "Stop" setting: the rest of the links from the same click don't run
+        if task.state == FAILED and task.stop_on_error:
+            for other in list(self.tasks):
+                if other.batch == task.batch and other.state == QUEUED:
+                    other.state = FAILED
+                    other.error = "Not downloaded: stopped after an error."
+                    other.finished_at = time.time()
+                    self.move_to_history(other)
+
+        self.refresh_downloads()
+        self.start_next_downloads()
+
+        if not any(t.batch == task.batch for t in self.tasks):
+            self.batch_finished(task.batch)
+
+    def move_to_history(self, task):
+
+        if task in self.tasks:
+            self.tasks.remove(task)
+        self.history.insert(0, task)
+        save_history(self.history)
+
+    def batch_finished(self, batch):
+        """All links from one Download click are done: say how it went."""
+
+        tasks = [t for t in self.history if t.batch == batch]
+        done = [t for t in tasks if t.state == DONE]
+        failed = [t for t in tasks if t.state == FAILED]
+
+        if not done and not failed:
+            return  # all cancelled: the user knows
+
+        if failed:
+            if len(tasks) == 1:
+                self.toast("error", "Download failed", failed[0].error, 6000)
+            else:
+                self.toast(
+                    "error",
+                    "Some downloads failed",
+                    f"{len(done)} saved, {len(failed)} failed.",
+                    6000,
+                )
+        elif len(done) == 1:
+            self.toast("success", "Download complete", self.short_title(done[0]))
+        else:
+            self.toast("success", "Downloads complete", f"{len(done)} saved.")
+
+        # Flash the taskbar button if the user is in another window
+        QApplication.alert(self)
+
+    @staticmethod
+    def short_title(task, length=60):
+
+        name = task.name()
+        return name if len(name) <= length else name[: length - 1] + "…"
+
+    # --- the Downloads page ---
+
+    def refresh_downloads(self):
+        """Make the lists match self.tasks / self.history."""
+
+        self.sync_rows(self.current_list, self.current_rows, self.tasks)
+        self.sync_rows(self.recent_list, self.recent_rows, self.history)
+
+        active = len(self.tasks)
+        self.current_title.setText(
+            f"Current downloads ({active})" if active else "Current downloads"
+        )
+        self.current_empty.setVisible(not active)
+        self.recent_empty.setVisible(not self.history)
+        self.clear_history_button.setVisible(bool(self.history))
+        self.retry_all_button.setVisible(any(t.state == FAILED for t in self.history))
+        self.update_downloads_badge(active)
+
+    def sync_rows(self, layout, rows, tasks):
+
+        wanted = {task.id for task in tasks}
+
+        for task_id in [i for i in rows if i not in wanted]:
+            row = rows.pop(task_id)
+            layout.removeWidget(row)
+            row.deleteLater()
+
+        for index, task in enumerate(tasks):
+            row = rows.get(task.id)
+            if row is None:
+                row = DownloadRow(task, self.row_actions)
+                rows[task.id] = row
+            if layout.indexOf(row) != index:
+                layout.insertWidget(index, row)
+            row.refresh()
+
+    def refresh_row(self, task):
+
+        row = self.current_rows.get(task.id) or self.recent_rows.get(task.id)
+        if row:
+            row.refresh()
+
+    def update_downloads_badge(self, count):
+        """A count on the Downloads item in the sidebar while things run."""
+
+        if count and self.downloads_badge is None:
+            item = self.navigationInterface.widget(self.downloads_page.objectName())
+            self.downloads_badge = InfoBadge.attension(
+                str(count),
+                parent=item.parent(),
+                target=item,
+                position=InfoBadgePosition.NAVIGATION_ITEM,
+            )
+        elif self.downloads_badge is not None:
+            self.downloads_badge.setText(str(count))
+            self.downloads_badge.adjustSize()
+
+        if self.downloads_badge is not None:
+            self.downloads_badge.setVisible(bool(count))
+
+    # --- buttons on a download ---
+
+    def toggle_pause(self, task):
+
+        if not task.running or task.cancel_requested:
+            return
+
+        if task.state == PAUSED:
+            core.set_process_paused(task.helper_process, False)
+            task.resume_event.set()
+            task.state = DOWNLOADING
+            task.status = "Resuming…"
+        else:
+            task.state = PAUSED
+            task.resume_event.clear()  # the download thread waits at its next step
+            core.set_process_paused(task.helper_process, True)
+            task.status = f"Paused at {task.fraction:.0%}"
+
+        self.refresh_row(task)
+
+    def cancel_task(self, task):
+
+        if not task.active or task.cancel_requested:
+            return
+
+        task.cancel_requested = True
+
+        if not task.running:
+            # Hadn't started yet: nothing to stop
+            self.task_finished(task, 0, None)
+            return
+
+        task.status = "Cancelling…"
+        task.resume_event.set()  # wake a paused download so it can stop
+
+        process = task.helper_process
+        if process and process.poll() is None:
+            core.set_process_paused(process, False)
+            process.terminate()
+
+        self.refresh_row(task)
+
+    def cancel_all(self):
+
+        for task in list(self.tasks):
+            self.cancel_task(task)
+
+    def open_task_file(self, task):
+
+        if task.path and os.path.exists(task.path):
+            os.startfile(task.path)
+        else:
+            self.toast(
+                "warning",
+                "File not found",
+                "It may have been moved or deleted.",
+            )
+            self.refresh_row(task)
+
+    def show_task_in_folder(self, task):
+
+        path = task.path
+        if path and os.path.isfile(path):
+            subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+        elif path and os.path.isdir(path):
+            os.startfile(path)
+        else:
+            self.open_folder()
+
+    def retry_task(self, task):
+
+        self.retry([task])
+
+    def retry_all_failed(self):
+
+        self.retry([t for t in self.history if t.state == FAILED])
+
+    def retry(self, tasks):
+        """Download these again, with the same choices as the first time."""
+
+        for task in tasks:
+            if task in self.history:
+                self.history.remove(task)
+
+        details = {}
+        for task in tasks:
+            details[task.url] = {
+                "title": task.title,
+                "site": task.site,
+                "thumbnail": task.thumbnail,
+                "thumbnail_url": task.thumbnail_url,
+            }
+
+        # Links that wanted the same thing go together
+        groups = {}
+        for task in tasks:
+            key = (task.mode, task.height, task.quality)
+            groups.setdefault(key, []).append(task.url)
+
+        for (mode, height, quality), urls in groups.items():
+            self.queue_downloads(urls, mode, height, quality, details)
+
+        save_history(self.history)
+        self.refresh_downloads()
+
+    def remove_task(self, task):
+
+        if task in self.history:
+            self.history.remove(task)
+            save_history(self.history)
+            self.refresh_downloads()
+
+    def clear_history(self):
+
+        self.history = []
+        save_history(self.history)
+        self.refresh_downloads()
+
+    # --- what Home shows after Download ---
+
+    def show_started(self, tasks):
+
+        if len(tasks) == 1:
+            text = f"✓  Download started: {self.short_title(tasks[0])}"
+        else:
+            text = f"✓  {len(tasks)} downloads started"
+
+        waiting = sum(1 for t in self.tasks if t.state == QUEUED)
+        if waiting:
+            text += (
+                f"\n{waiting} waiting for their turn (up to {MAX_PARALLEL} at once)."
+            )
+
+        self.status_label.setText(text)
+        paint(self.status_label, GOOD)
+        self.go_to_downloads_button.show()
+        self.status_area.show()
+
+    def show_status(self, text, color):
+        """A message under the Download button (problems to fix, errors)."""
+
+        self.status_label.setText(text)
+        paint(self.status_label, color if color != MUTED else theme.TEXT)
+        self.go_to_downloads_button.hide()
+        self.status_area.show()
+
+    def on_unexpected_error(self, exc_type, exc_value, exc_traceback):
+        """Called for crashes in button clicks and other UI callbacks."""
+
+        log.error("Unexpected error", exc_info=(exc_type, exc_value, exc_traceback))
+        self.show_status(
+            "Something went wrong. Try again; if it keeps happening, open "
+            "Settings → Error log.",
+            BAD,
+        )
+
+    # --- the work itself (background threads) ---
+
+    def download_video_link(self, task):
+
+        options = dict(task.options)
         make_playable = options.pop("make_playable", False)
+        options["progress_hooks"] = [lambda data: self.progress_hook(task, data)]
 
         with yt_dlp.YoutubeDL(options) as downloader:
             # Clean social-media titles before the file is named
@@ -1712,53 +2027,56 @@ class VideoDownloader(FluentWindow):
 
             # After merging: convert AV1/VP9/HEVC to H.264 so the picture shows
             if make_playable and self.has_ffmpeg:
-                downloader.add_post_processor(MakePlayable(self.convert_video))
+                downloader.add_post_processor(
+                    MakePlayable(
+                        lambda path, duration: self.convert_video(task, path, duration)
+                    )
+                )
 
-            downloader.download([url])
+            info = downloader.extract_info(task.url, download=True) or {}
 
+        # Where the finished file is (after merging / converting to MP3)
+        downloads = info.get("requested_downloads") or [info]
+        task.path = downloads[0].get("filepath") or info.get("filepath")
         return 1
 
-    def convert_video(self, path, duration):
+    def convert_video(self, task, path, duration):
         """Runs on the download thread: convert to H.264 with progress."""
 
-        prefix = self.item_prefix()
-
         def progress(fraction):
-            text = f"{prefix}Converting so it plays everywhere  {fraction:.0%}"
-            self.ui(self.update_progress, fraction, text, "")
+            text = f"Converting so it plays everywhere  ·  {fraction:.0%}"
+            self.ui(self.update_task_progress, task, fraction, text)
 
         def start(command):
-            # Kept in helper_process so Pause / Cancel work while converting
-            self.helper_process = subprocess.Popen(
+            # Kept on the task so Pause / Cancel work while converting
+            task.helper_process = subprocess.Popen(
                 command,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 text=True,
                 creationflags=NO_WINDOW,
             )
-            return self.helper_process
+            return task.helper_process
 
         self.ui(
-            self.update_progress, 0, f"{prefix}Converting so it plays everywhere…", ""
+            self.update_task_progress, task, 0, "Converting so it plays everywhere…"
         )
 
         try:
             core.convert_to_h264(path, duration, progress, start)
         finally:
-            self.helper_process = None
+            task.helper_process = None
 
-        if self.cancel_requested:
+        if task.cancel_requested:
             raise DownloadCancelled()
 
-    def download_photo_link(self, url, cookie_args):
+    def download_photos(self, task):
 
-        return self.download_photos(url, cookie_args)
-
-    def download_photos(self, url, cookie_args):
+        url, cookie_args = task.url, task.options
 
         # Reuse what the preview found; otherwise look the post up first
         if url not in self.photo_cache:
-            self.ui(self.show_status, "Finding photos…", MUTED)
+            self.ui(self.update_task_progress, task, 0, "Finding photos…")
             photos, meta = core.find_photos(url, cookie_args)
             self.photo_cache[url] = (photos, core.post_details(meta) if meta else {})
 
@@ -1772,6 +2090,7 @@ class VideoDownloader(FluentWindow):
             f"{details.get('title') or 'Photos'} [{details.get('id', 'post')}]"
         )
         target = os.path.join(self.download_folder, folder_name)
+        task.path = target
 
         command, options = core.run_gallery_dl(
             [
@@ -1788,27 +2107,39 @@ class VideoDownloader(FluentWindow):
             stderr=subprocess.STDOUT,
         )
 
-        self.helper_process = subprocess.Popen(command, **options)
+        task.helper_process = subprocess.Popen(command, **options)
         total, done, output = len(photos), 0, []
 
         # gallery-dl prints one line per saved file ("# path" if it already existed)
-        for line in self.helper_process.stdout:
+        for line in task.helper_process.stdout:
             line = line.strip()
             output.append(line)
 
             if line.startswith(("# ", target)) or os.path.isabs(line):
                 done += 1
-                self.ui(self.update_photo_progress, done, total)
+                fraction = min(done / total, 1) if total else 0
+                text = f"Saving photos  ·  {done} of {total}"
+                self.ui(self.update_task_progress, task, fraction, text)
 
-        self.helper_process.wait()
+        task.helper_process.wait()
 
-        if self.cancel_requested:
+        if task.cancel_requested:
             raise DownloadCancelled()
 
-        if self.helper_process.returncode and not done:
+        if task.helper_process.returncode and not done:
             raise RuntimeError(core.gallery_error("\n".join(output)))
 
         return done
+
+    def wait_while_paused(self, task):
+        """Called from the download thread: block here while paused."""
+
+        while not task.resume_event.wait(0.2):
+            if task.cancel_requested:
+                break
+
+        if task.cancel_requested:
+            raise DownloadCancelled()
 
     def ui(self, function, *args, **kwargs):
         """Run a function on the UI thread. Safe to call from any thread."""
@@ -1830,20 +2161,18 @@ class VideoDownloader(FluentWindow):
     # PROGRESS
     # -------------------------------
 
-    def item_prefix(self):
-
-        index, total = self.current_item
-        return f"{index} of {total}  ·  " if total > 1 else ""
-
-    def progress_hook(self, data):
+    def progress_hook(self, task, data):
 
         # yt-dlp calls this between chunks: waiting here pauses the download.
         # If the site drops the connection meanwhile, yt-dlp resumes from the
         # bytes it already has.
-        self.wait_while_paused()
+        self.wait_while_paused(task)
 
-        if self.cancel_requested:
-            raise DownloadCancelled()
+        # Links added without a preview get their title and picture now
+        info = data.get("info_dict") or {}
+        if not task.asked_details and info:
+            task.asked_details = True
+            self.ui(self.set_task_details, task, info)
 
         if data["status"] == "downloading":
             downloaded = data.get("downloaded_bytes") or 0
@@ -1853,7 +2182,7 @@ class VideoDownloader(FluentWindow):
             speed = data.get("speed")
             eta = data.get("eta")
 
-            details = []
+            details = [f"{fraction:.0%}"]
             if total:
                 details.append(f"{human_size(downloaded)} of {human_size(total)}")
             if speed:
@@ -1861,96 +2190,45 @@ class VideoDownloader(FluentWindow):
             if eta:
                 details.append(f"{human_time(eta)} left")
 
-            text = f"{self.item_prefix()}Downloading {fraction:.0%}"
-            self.ui(self.update_progress, fraction, text, "  ·  ".join(details))
+            self.ui(self.update_task_progress, task, fraction, "  ·  ".join(details))
 
         elif data["status"] == "finished":
-            text = f"{self.item_prefix()}Processing file…"
-            self.ui(self.update_progress, 1, text, "")
+            self.ui(self.update_task_progress, task, 1, "Finishing…")
 
-    def update_progress(self, fraction, text, details):
+    def update_task_progress(self, task, fraction, text):
 
         # Updates already queued when Pause was pressed shouldn't undo "Paused"
-        if not self.is_downloading or self.cancel_requested or self.paused:
+        if not task.running or task.cancel_requested or task.state == PAUSED:
             return
 
-        self.last_fraction = fraction
-        self.progress.setValue(int(fraction * 1000))
-        self.show_status(text, MUTED)
-        self.speed_label.setText(details)
+        task.fraction = fraction
+        task.status = text
+        self.refresh_row(task)
 
-    def update_photo_progress(self, done, total):
+    def set_task_details(self, task, info):
 
-        fraction = done / total if total else 0
-        text = f"{self.item_prefix()}Saving photos {done} of {total}"
-        self.update_progress(min(fraction, 1), text, "")
+        task.title = task.title or core.clean_title(info) or info.get("title") or ""
+        task.site = task.site or core.site_name(info)
+        url = info.get("thumbnail")
 
-    def show_status(self, text, color):
+        if url and task.thumbnail is None:
+            task.thumbnail_url = url
 
-        self.status_area.show()
-        self.status_label.setText(text)
-        paint(self.status_label, color if color != MUTED else theme.TEXT)
+            def load():
+                try:
+                    picture = core.load_thumbnail(url, max_size=(224, 126))
+                except Exception:
+                    return  # no picture is fine
+                self.ui(self.set_task_picture, task, picture)
 
-    def on_unexpected_error(self, exc_type, exc_value, exc_traceback):
-        """Called for crashes in button clicks and other UI callbacks."""
+            threading.Thread(target=load, daemon=True).start()
 
-        log.error("Unexpected error", exc_info=(exc_type, exc_value, exc_traceback))
-        self.show_status(
-            "Something went wrong. Try again; if it keeps happening, open "
-            "Settings → Error log.",
-            BAD,
-        )
+        self.refresh_row(task)
 
-    def download_finished(self, saved, failed, kind):
+    def set_task_picture(self, task, picture):
 
-        errors = [reason for _, reason in failed]
-        self.failed_links = [link for link, _ in failed if link]
-
-        cancelled = self.cancel_requested
-
-        self.is_downloading = False
-        self.cancel_requested = False
-        self.paused = False
-        self.resume_event.set()
-        self.helper_process = None
-        self.progress.resume()
-        self.update_main_button()
-        self.speed_label.setText("")
-
-        files = f"{saved} {kind}{'s' if saved != 1 else ''}"
-
-        if cancelled:
-            text = "Download cancelled." + (f" {files} saved." if saved else "")
-            self.show_status(text, MUTED)
-        elif errors:
-            self.progress.setValue(0)
-            self.progress.setError(True)
-            reasons = "\n".join(f"•  {reason}" for reason in dict.fromkeys(errors))
-            head = f"{files} saved, {len(errors)} failed:\n" if saved else ""
-            self.show_status(head + reasons, BAD)
-            self.toast(
-                "error",
-                "Some downloads failed" if saved else "Download failed",
-                f"{files} saved, {len(errors)} failed." if saved else errors[0],
-                duration=6000,
-            )
-        else:
-            self.progress.setValue(1000)
-            self.show_status(f"✓  Done. {files} saved.", GOOD)
-            self.toast("success", "Download complete", f"{files} saved.")
-
-        if self.failed_links and not cancelled:
-            count = len(self.failed_links)
-            self.retry_button.setText(
-                "Retry failed" if count == 1 else f"Retry {count} failed"
-            )
-            self.retry_button.show()
-
-        if saved:
-            self.open_folder_button.show()
-
-        # Flash the taskbar button if the user is in another window
-        QApplication.alert(self)
+        task.thumbnail = picture
+        self.refresh_row(task)
 
     # -------------------------------
     # UPDATES
@@ -2019,7 +2297,7 @@ class VideoDownloader(FluentWindow):
 
         if self.is_downloading:
             self.update_label.setText(
-                "Finish or cancel the current download first, then update."
+                "Finish or cancel the current downloads first, then update."
             )
             return
 
@@ -2085,9 +2363,14 @@ class VideoDownloader(FluentWindow):
     def closeEvent(self, event):
 
         if self.is_downloading:
+            count = len(self.tasks)
             box = MessageBox(
-                "Download in progress",
-                "A download is running. Cancel it and quit?",
+                "Downloads in progress",
+                (
+                    "A download is still running. Cancel it and quit?"
+                    if count == 1
+                    else f"{count} downloads are still running. Cancel them and quit?"
+                ),
                 self,
             )
             box.yesButton.setText("Cancel and quit")
@@ -2097,7 +2380,7 @@ class VideoDownloader(FluentWindow):
                 event.ignore()
                 return
 
-            self.cancel_download()
+            self.cancel_all()
 
         self.save_settings()
         event.accept()

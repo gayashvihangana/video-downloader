@@ -35,6 +35,12 @@ ArchitecturesInstallIn64BitMode=x64compatible
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: unchecked
 
+[InstallDelete]
+; Updating: remove the old version's program files first, so libraries it
+; no longer uses (e.g. 1.x's CustomTkinter and Tcl/Tk) don't pile up.
+; Settings, history and logs live elsewhere and are kept.
+Type: filesandordirs; Name: "{app}\_internal"
+
 [Files]
 Source: "..\dist\VideoDownloader\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion
 

@@ -859,6 +859,13 @@ class MakePlayable(PostProcessor):
         return [], information
 
 
+def site_name(info):
+    """The site a link is from, spelled the usual way ("YouTube")."""
+
+    site = info.get("extractor_key") or info.get("extractor") or ""
+    return {"Youtube": "YouTube", "TikTok": "TikTok"}.get(site, site)
+
+
 def summarize_video(info, need_audio_in_file):
     """What the preview needs from yt-dlp's info about a link."""
 
@@ -866,11 +873,10 @@ def summarize_video(info, need_audio_in_file):
     entries = list(info.get("entries") or [])
     video = info if info.get("formats") or not entries else entries[0]
 
-    site = info.get("extractor_key") or info.get("extractor") or ""
     qualities = analyse_formats(video, need_audio_in_file)
 
     return {
-        "site": {"Youtube": "YouTube", "TikTok": "TikTok"}.get(site, site),
+        "site": site_name(info),
         "title": clean_title(info) or clean_title(video),
         "uploader": (
             video.get("uploader") or video.get("channel") or info.get("uploader") or ""
