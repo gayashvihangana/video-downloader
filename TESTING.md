@@ -33,7 +33,7 @@ Tests also run automatically on GitHub for every push (Actions → **tests**).
 |---|---|---|
 | Unit | `test_titles.py`, `test_errors.py`, `test_formats.py`, `test_checks.py` | Title cleaning, error messages, qualities and sizes, link, folder and space checks, version compare |
 | Integration (faked network) | `test_photos_and_updates.py` | Photo posts (gallery-dl output), update check, update download and checksum |
-| UI | `test_app.py` | The real window (hidden): preview, modes, quality, pause/resume/cancel, skip/stop on errors, retry, settings, update banner, fits a 1366×768 screen |
+| UI | `test_app.py` | The real window (drawn off-screen): preview, modes, quality, pause/resume/cancel, skip/stop on errors, retry, settings, update banner, fits a 1366×768 screen |
 | Live (opt-in) | `test_live.py` | Real YouTube lookup, thumbnail and download |
 | Manual | checklist below | Installer, real sites, sign-in, things that need a person |
 
@@ -41,15 +41,15 @@ Tests also run automatically on GitHub for every push (Actions → **tests**).
 
 | ID | Bug | Root cause | Fix | Regression test |
 |---|---|---|---|---|
-| BUG-001 | After a download (or any link with a thumbnail), the next link's preview stayed on "Looking up the link…" | CustomTkinter's `image=None` doesn't clear the inner label, which kept pointing at the deleted thumbnail, so the next update crashed halfway | Clear the inner label's image too, and catch any error while drawing the preview | `test_bug001_second_link_after_a_thumbnail_shows_its_preview`, `test_error_after_a_thumbnail_does_not_get_stuck` |
+| BUG-001 | After a download (or any link with a thumbnail), the next link's preview stayed on "Looking up the link…" | (CustomTkinter UI) `image=None` didn't clear the inner label, which kept pointing at the deleted thumbnail, so the next update crashed halfway | Clear the old picture, and catch any error while drawing the preview. The Qt UI keeps its own copy of each picture | `test_bug001_second_link_after_a_thumbnail_shows_its_preview`, `test_error_after_a_thumbnail_does_not_get_stuck` |
 | BUG-002 | "Disk full" errors said "cookies file can't be found" | `"errno 2"` also matched `"errno 28"` | Match whole words (`\berrno 2\b`) | `test_known_errors_get_plain_advice[...No space left...]` |
 | BUG-003 | The chosen quality wasn't kept for the next link | The menu showed "Checking…" while loading, so the old choice was read too late | Remember the height the user picked | `test_quality_menu_lists_sizes_and_remembers_height` |
 | BUG-004 | A long title made the window wider and wider | Title wrap width followed the card width, and the card grew with the title | Cap the wrap width | (visual check) |
 | UX-001 | Window taller than small laptop screens; the progress area was cut off | Every setting was on the main screen | Settings moved to a ⚙ Settings page; save folder stays visible | `test_window_fits_a_small_laptop_screen` |
-| BUG-005 | Long error messages made the window wider on scaled displays (125%) | Wrap width mixed screen pixels with CustomTkinter's scaled points | Convert the card width before wrapping | `test_bug005_panel_and_long_message_do_not_widen_the_window` |
+| BUG-005 | Long error messages made the window wider on scaled displays (125%) | (CustomTkinter UI) wrap width mixed screen pixels with scaled points | Qt labels word-wrap to the space they have | `test_bug005_long_messages_do_not_widen_the_window` |
 | BUG-006 | A user's videos played **sound only** (black picture) | The app picked AV1 (YouTube) or HEVC (TikTok) for the smallest file, and many Windows PCs can't decode those | Default "Plays everywhere": prefer H.264 + AAC. Sizes with no H.264 version are marked "converts" and converted with ffmpeg after downloading. "Smaller files" setting for the old behaviour | `tests/test_playable.py` (includes a real VP9 → H.264 conversion) |
 | UX-002 | Sign-in was a permanent setting most people never need | Not shown where it matters | Sign-in panel appears only on links that need an account. Installed browsers only, Firefox first, auto-retry, sign out from the chip | `tests/test_sign_in.py` |
-| ARCH-001 | Background threads updated the window directly | Tk isn't thread-safe | Threads hand work to the main thread through a queue | all UI tests |
+| ARCH-001 | Background threads updated the window directly | UI toolkits aren't thread-safe | Threads hand work to the UI thread through a queued Qt signal (`VideoDownloader.ui`) | all UI tests, `test_progress_from_the_download_thread_reaches_the_window` |
 
 ## Manual checklist (before each release)
 
@@ -100,5 +100,5 @@ Please include:
 
 1. **Steps** to make it happen (with the link if you can).
 2. **What you expected** and **what happened** (screenshot).
-3. App version (top right, e.g. v1.0.1).
+3. App version (Settings → About, e.g. 2.0.0).
 4. The last lines of the error log (⚙ Settings → Open error log).

@@ -1,4 +1,5 @@
 yt-dlp[default]
 gallery-dl
-customtkinter
+PySide6>=6.10
+PySide6-Fluent-Widgets>=1.11
 pillow
