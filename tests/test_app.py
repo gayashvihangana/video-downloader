@@ -5,6 +5,7 @@ import json
 import threading
 import time
 
+import pytest
 from conftest import pump, shown, wait_until
 from PIL import Image
 
@@ -562,6 +563,80 @@ def test_update_banner_only_for_newer_versions(app):
     assert shown(app.update_banner)
     assert shown(app.update_button)
     assert "99.0.0 is available" in app.update_label.text()
+
+
+def test_new_update_is_optional_at_first(app):
+    app.show_update_result(
+        {"version": "99.0.0", "size": 1_000_000, "published": time.time()},
+        None,
+        manual=False,
+    )
+    assert "within 7 days" in app.update_label.text()
+    assert shown(app.later_button)
+    assert not app.update_required
+    assert app.main_button.text() == "Download"
+
+
+def required_release():
+    return {"version": "99.0.0", "size": 1_000_000, "required": True}
+
+
+def test_required_update_blocks_new_downloads(app, monkeypatch):
+    monkeypatch.setattr(core, "FROZEN", True)  # the installed app
+    asked = []
+    monkeypatch.setattr(app, "ask_to_update", lambda: asked.append(1))
+
+    app.show_update_result(required_release(), None, manual=False)
+
+    assert app.update_required
+    assert asked == [1]  # "Update required: Update now / Quit"
+    assert "99.0.0 is required" in app.update_label.text()
+    assert not shown(app.later_button)  # can't be put off
+    assert shown(app.website_button)
+    assert app.main_button.text() == "Update to download"
+    assert not app.main_button.isEnabled()
+
+    # Ctrl+Enter asks again instead of downloading
+    app.url_box.setPlainText("https://youtu.be/a")
+    app.start_download()
+    assert app.tasks == []
+    assert asked == [1, 1]
+
+
+def test_required_update_lets_running_downloads_finish(app, monkeypatch):
+    monkeypatch.setattr(core, "FROZEN", True)
+    asked = []
+    monkeypatch.setattr(app, "ask_to_update", lambda: asked.append(1))
+
+    slow = SlowJob(app)
+    [task] = app.queue_downloads(["https://a"], core.VIDEO, None, "Best", job=slow)
+    app.show_update_result(required_release(), None, manual=False)
+
+    assert asked == []  # not while downloading
+    assert task.state == "downloading"
+
+    slow.release.set()
+    assert wait_until(finished(app))
+    assert wait_until(lambda: asked == [1])  # once it's done
+
+
+def test_required_update_never_blocks_when_running_from_source(app, monkeypatch):
+    monkeypatch.setattr(core, "FROZEN", False)
+    monkeypatch.setattr(app, "ask_to_update", lambda: pytest.fail("asked"))
+
+    app.show_update_result(required_release(), None, manual=False)
+
+    assert not app.update_required
+    assert "required for the installed app" in app.update_label.text()
+    assert app.main_button.text() == "Download"
+
+
+def test_failed_update_offers_try_again_and_the_website(app):
+    app.update_required = True
+    app.update_failed("Connection reset.")
+    assert "Update failed: Connection reset. Try again" in app.update_label.text()
+    assert app.update_button.text() == "Try again"
+    assert shown(app.website_button)
 
 
 def test_update_waits_for_running_download(app):

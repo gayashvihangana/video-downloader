@@ -5,12 +5,14 @@ updates live here, so they can be tested and reused without a UI. The window
 is in the ui package.
 """
 
+import calendar
 import ctypes
 import faulthandler
 import hashlib
 import io
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -1055,6 +1057,64 @@ def parse_version(text):
     return tuple(int(number) for number in re.findall(r"\d+", text or "")[:3])
 
 
+# Updates are optional for a while, then required: everyone ends up on a
+# recent version, but nobody is interrupted the day a release comes out.
+UPDATE_GRACE_DAYS = 7
+
+# A release can be required at once (a security fix, downloads broken by a
+# site change) with a hidden line in its GitHub release notes:
+#     <!-- update: required -->
+# or only for versions older than a given one:
+#     <!-- minimum-version: 2.1.0 -->
+REQUIRED_MARK = re.compile(r"<!--\s*update:\s*required\s*-->", re.IGNORECASE)
+MINIMUM_MARK = re.compile(
+    r"<!--\s*minimum[- ]version:\s*v?([\d.]+)\s*-->", re.IGNORECASE
+)
+
+
+def release_rules(notes):
+    """(required now?, minimum version or None) from release notes."""
+
+    notes = notes or ""
+    minimum = MINIMUM_MARK.search(notes)
+    return bool(REQUIRED_MARK.search(notes)), minimum.group(1) if minimum else None
+
+
+def update_policy(release, current=APP_VERSION, now=None):
+    """What to do about the latest release.
+
+    None if it isn't newer. Otherwise {"required": bool, "days_left": int}:
+    optional during the grace period, then required. Required straight away
+    if the release says so, or if `current` is below its minimum version.
+    """
+
+    if not release or parse_version(release["version"]) <= parse_version(current):
+        return None
+
+    now = time.time() if now is None else now
+    published = release.get("published") or now
+    days_old = max(0.0, (now - published) / 86400)
+    days_left = max(0, math.ceil(UPDATE_GRACE_DAYS - days_old))
+
+    minimum = release.get("minimum")
+    required = (
+        release.get("required", False)
+        or bool(minimum and parse_version(current) < parse_version(minimum))
+        or days_left == 0
+    )
+
+    return {"required": required, "days_left": 0 if required else days_left}
+
+
+def github_time(text):
+    """ "2026-11-22T10:00:00Z" -> seconds since 1970 (None if missing)."""
+
+    try:
+        return calendar.timegm(time.strptime(text, "%Y-%m-%dT%H:%M:%SZ"))
+    except (TypeError, ValueError):
+        return None
+
+
 def fetch_latest_release():
     """Newest published release and its Setup.exe, or None if it has none."""
 
@@ -1082,8 +1142,13 @@ def fetch_latest_release():
     if not asset:
         return None
 
+    required, minimum = release_rules(data.get("body"))
+
     return {
         "version": (data.get("tag_name") or "").lstrip("vV"),
+        "published": github_time(data.get("published_at")),
+        "required": required,
+        "minimum": minimum,
         "name": asset["name"],
         "url": asset["browser_download_url"],
         "size": asset.get("size") or 0,
