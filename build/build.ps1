@@ -10,6 +10,12 @@
 #
 # Older Setup files are moved to release\old so release\ only holds the latest.
 #
+# Publishing: a GitHub release tagged v<version> with the Setup.exe attached.
+# Installed apps offer it for 7 days, then require it (core.UPDATE_GRACE_DAYS).
+# To require it at once (security fix, downloads broken), add a hidden line
+# to the release notes:   <!-- update: required -->
+# or only for older versions:   <!-- minimum-version: 2.1.0 -->
+#
 # Needs: pip install -r requirements.txt pyinstaller
 #        Inno Setup 6 (winget install JRSoftware.InnoSetup)
 #        ffmpeg on PATH, and Deno in tools\deno\deno.exe

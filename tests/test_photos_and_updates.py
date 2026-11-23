@@ -119,6 +119,8 @@ def test_latest_release_picks_the_setup_file(monkeypatch):
         monkeypatch,
         {
             "tag_name": "v1.2.0",
+            "published_at": "1970-01-02T00:00:00Z",
+            "body": "Fixes.\n<!-- minimum-version: 1.1.0 -->",
             "assets": [
                 {"name": "notes.txt", "browser_download_url": "x"},
                 {
@@ -133,6 +135,9 @@ def test_latest_release_picks_the_setup_file(monkeypatch):
     release = core.fetch_latest_release()
     assert release == {
         "version": "1.2.0",
+        "published": 86400,
+        "required": False,
+        "minimum": "1.1.0",
         "name": "VideoDownloader-Setup-1.2.0.exe",
         "url": "u",
         "size": 5,
@@ -190,3 +195,72 @@ def test_damaged_update_is_rejected(file_server):
     data, url = file_server
     with pytest.raises(RuntimeError, match="damaged"):
         download_update(release_for(data, url, "sha256:" + "0" * 64), lambda d, t: None)
+
+
+# ---------- mandatory updates (optional for a while, then required) ----------
+
+DAY = 86400
+NOW = 1_800_000_000
+
+
+def release(version="2.1.0", days_old=0.0, **extra):
+    return {"version": version, "published": NOW - days_old * DAY, **extra}
+
+
+def policy(rel, current="2.0.0"):
+    return core.update_policy(rel, current=current, now=NOW)
+
+
+def test_no_policy_when_already_up_to_date():
+    assert policy(release("2.0.0")) is None
+    assert policy(release("1.9.9")) is None
+    assert policy(None) is None
+
+
+@pytest.mark.parametrize(
+    ("days_old", "required", "days_left"),
+    [
+        (0, False, 7),
+        (0.5, False, 7),
+        (3, False, 4),
+        (6.2, False, 1),
+        (7, True, 0),
+        (30, True, 0),
+    ],
+)
+def test_optional_during_the_grace_period_then_required(days_old, required, days_left):
+    assert policy(release(days_old=days_old)) == {
+        "required": required,
+        "days_left": days_left,
+    }
+
+
+def test_a_release_can_be_required_at_once():
+    assert policy(release(required=True))["required"] is True
+
+
+def test_minimum_version_requires_only_older_versions():
+    rel = release("2.3.0", minimum="2.2.0")
+    assert policy(rel, current="2.1.0")["required"] is True
+    assert policy(rel, current="2.2.0")["required"] is False
+
+
+def test_unknown_publish_date_starts_the_grace_period_now():
+    assert policy({"version": "2.1.0"}) == {"required": False, "days_left": 7}
+
+
+def test_rules_are_read_from_hidden_lines_in_the_release_notes():
+    notes = "Fixed YouTube downloads.\n\n<!-- update: required -->\n"
+    assert core.release_rules(notes) == (True, None)
+
+    notes = "New look.\n<!-- minimum-version: v2.1.0 -->"
+    assert core.release_rules(notes) == (False, "2.1.0")
+
+    assert core.release_rules("Just notes. update: required") == (False, None)
+    assert core.release_rules(None) == (False, None)
+
+
+def test_github_dates():
+    assert core.github_time("1970-01-02T00:00:00Z") == DAY
+    assert core.github_time(None) is None
+    assert core.github_time("yesterday") is None

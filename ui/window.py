@@ -15,8 +15,8 @@ import threading
 import time
 
 import yt_dlp
-from PySide6.QtCore import QObject, QSignalBlocker, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QIcon, QKeySequence, QShortcut
+from PySide6.QtCore import QObject, QSignalBlocker, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -209,7 +209,10 @@ class VideoDownloader(FluentWindow):
         self.history = load_history()
         self.batches = itertools.count(1)
         self.downloads_badge = None
+
+        # Updates (see show_update_result)
         self.update_release = None
+        self.update_required = False
 
         # Work handed from background threads to the UI thread (see ui())
         self.dispatcher = Dispatcher(self)
@@ -226,9 +229,14 @@ class VideoDownloader(FluentWindow):
         self.create_interface()
         self.restore_settings()
 
-        # The installed app checks for updates quietly a moment after it opens
+        # The installed app checks for updates quietly a moment after it opens,
+        # and again every few hours if it's left open
         if FROZEN:
             QTimer.singleShot(2500, self, self.check_for_updates)
+            self.update_timer = QTimer(self)
+            self.update_timer.setInterval(6 * 60 * 60 * 1000)
+            self.update_timer.timeout.connect(self.check_for_updates)
+            self.update_timer.start()
 
     # -------------------------------
     # SETTINGS (remembered between sessions)
@@ -372,6 +380,10 @@ class VideoDownloader(FluentWindow):
         self.update_button.clicked.connect(self.start_update)
         self.later_button = self.update_banner.add_button(PushButton("Later"))
         self.later_button.clicked.connect(self.hide_update_banner)
+        # For a required update that won't download: get it from the website
+        self.website_button = self.update_banner.add_button(PushButton("Website"))
+        self.website_button.clicked.connect(self.open_releases_page)
+        self.website_button.hide()
 
         self.update_banner.hide()
         layout.addWidget(self.update_banner)
@@ -932,6 +944,12 @@ class VideoDownloader(FluentWindow):
             os.startfile(self.download_folder)
 
     def update_main_button(self):
+
+        if self.update_required:
+            self.main_button.setText("Update to download")
+            self.main_button.setIcon(FluentIcon.UPDATE)
+            self.main_button.setEnabled(False)
+            return
 
         urls = self.get_urls()
         count = len(urls)
@@ -1625,6 +1643,10 @@ class VideoDownloader(FluentWindow):
     def start_download(self):
         """Download button: queue the links, then clear Home for the next ones."""
 
+        if self.update_required:
+            self.ask_to_update()
+            return
+
         urls = self.get_urls()
 
         if not urls:
@@ -1755,6 +1777,10 @@ class VideoDownloader(FluentWindow):
 
         if not any(t.batch == task.batch for t in self.tasks):
             self.batch_finished(task.batch)
+
+        # A required update was waiting for these downloads to finish
+        if self.update_required and not self.is_downloading:
+            QTimer.singleShot(500, self, self.ask_to_update)
 
     def move_to_history(self, task):
 
@@ -2252,16 +2278,30 @@ class VideoDownloader(FluentWindow):
 
     def show_update_result(self, release, error, manual):
 
-        newer = release and core.parse_version(release["version"]) > core.parse_version(
-            APP_VERSION
-        )
+        # Can't check (offline, GitHub down): never block anyone for that
+        policy = core.update_policy(release)
 
-        if newer:
+        if policy:
             self.update_release = release
-            size = human_size(release["size"])
+            version, size = release["version"], human_size(release["size"])
+
+            # Only the installed app can update itself; running from source
+            # is never blocked
+            if policy["required"] and core.FROZEN:
+                self.require_update()
+                return
+
+            days = policy["days_left"]
+            when = (
+                "Please update today."
+                if days <= 1
+                else f"Please update within {days} days."
+            )
+            if policy["required"]:
+                when = "This update is required for the installed app."
             self.show_update_banner(
-                f"Version {release['version']} is available "
-                f"(you have {APP_VERSION}).  {size}",
+                f"Version {version} is available (you have {APP_VERSION}). "
+                f"{when}  {size}",
                 can_update=True,
             )
         elif not manual:
@@ -2280,9 +2320,54 @@ class VideoDownloader(FluentWindow):
         self.update_label.setText(text)
         self.later_button.setText("Later" if can_update else "Close")
         self.later_button.setEnabled(True)
+        # A required update can't be put off
+        self.later_button.setVisible(not self.update_required)
         self.update_button.setEnabled(True)
         self.update_button.setVisible(can_update)
+        self.website_button.setVisible(self.update_required)
         self.update_banner.show()
+
+    def require_update(self):
+        """The update is no longer optional: no new downloads until it's done."""
+
+        self.update_required = True
+        version = self.update_release["version"]
+
+        self.show_update_banner(
+            f"Version {version} is required. Update to keep downloading "
+            f"(you have {APP_VERSION}).",
+            can_update=True,
+        )
+        self.update_main_button()
+
+        # Downloads already running may finish; ask once they're done
+        if not self.is_downloading:
+            self.ask_to_update()
+
+    def ask_to_update(self):
+        """The "Update required" window: update now, or quit."""
+
+        box = MessageBox(
+            "Update required",
+            f"Version {self.update_release['version']} of Video Downloader is "
+            "out, and this version needs to be updated to keep working. "
+            "Updating takes about a minute and keeps your settings and "
+            "downloads.",
+            self,
+        )
+        box.yesButton.setText("Update now")
+        box.cancelButton.setText("Quit")
+
+        if box.exec():
+            self.start_update()
+        else:
+            self.close()
+
+    def open_releases_page(self):
+
+        QDesktopServices.openUrl(
+            QUrl(f"https://github.com/{core.GITHUB_REPO}/releases/latest")
+        )
 
     def hide_update_banner(self):
 
@@ -2301,7 +2386,7 @@ class VideoDownloader(FluentWindow):
             )
             return
 
-        if not FROZEN:
+        if not core.FROZEN:
             self.update_label.setText(
                 "Running from source: updates install only in the installed "
                 "app. Use git pull instead."
@@ -2332,9 +2417,14 @@ class VideoDownloader(FluentWindow):
 
     def update_failed(self, message):
 
-        self.update_label.setText(f"Update failed: {message}")
+        self.update_label.setText(
+            f"Update failed: {message.rstrip('.')}. Try again, or get it from "
+            "the website."
+        )
+        self.update_button.setText("Try again")
         self.update_button.setEnabled(True)
         self.later_button.setEnabled(True)
+        self.website_button.show()
 
     def install_update(self, installer):
 
