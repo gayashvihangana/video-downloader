@@ -92,6 +92,23 @@ void main() {
     expect(size, greaterThan(28436 + 50000)); // has both picture and sound
     await File(joined).delete();
 
+    // Told the real length, the joined file is cut to it (a file's own
+    // length can be wrong, which gave a black, silent tail on iPhone).
+    // 1 s + the joiner's 1 s slack, of 4 s: about half the size.
+    if (Platform.isIOS) {
+      await Merger.merge(
+        video: await tasks[0].filePath(),
+        audio: await tasks[1].filePath(),
+        output: joined,
+        duration: 1,
+      );
+      final cut = await File(joined).length();
+      // ignore: avoid_print
+      print('cut to 1 s: $cut bytes');
+      expect(cut, lessThan(size * 0.75));
+      await File(joined).delete();
+    }
+
     // The whole finish: join + save to the Gallery
     final saved = await finishDownload(
       id: id,

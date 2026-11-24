@@ -46,7 +46,8 @@ class MergePlugin: NSObject, FlutterPlugin {
         try await Self.merge(
           video: URL(fileURLWithPath: video),
           audio: URL(fileURLWithPath: audio),
-          output: URL(fileURLWithPath: output))
+          output: URL(fileURLWithPath: output),
+          duration: Double(args["duration"] ?? "") ?? 0)
         result(output)
       } catch {
         try? FileManager.default.removeItem(atPath: output)
@@ -68,7 +69,8 @@ class MergePlugin: NSObject, FlutterPlugin {
     }
   }
 
-  static func merge(video: URL, audio: URL, output: URL) async throws {
+  /// [duration]: the real length in seconds as the site says (0 = unknown).
+  static func merge(video: URL, audio: URL, output: URL, duration: Double = 0) async throws {
     let composition = AVMutableComposition()
     let videoAsset = AVURLAsset(url: video)
     let audioAsset = AVURLAsset(url: audio)
@@ -83,18 +85,26 @@ class MergePlugin: NSObject, FlutterPlugin {
     let videoRange = try await videoTrack.load(.timeRange)
     let audioRange = try await audioTrack.load(.timeRange)
 
+    // The result is as long as the shortest of: the picture, the sound and
+    // the real length. A file's own length can be wrong (longer than what's
+    // in it), which left a black, silent tail at the end.
+    var length = CMTimeMinimum(videoRange.duration, audioRange.duration)
+    if duration > 0 {
+      // a little slack: the streams can run a few frames past the rounded length
+      length = CMTimeMinimum(length, CMTime(seconds: duration + 1, preferredTimescale: 600))
+    }
+
     let compositionVideo = composition.addMutableTrack(
       withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid)
-    try compositionVideo?.insertTimeRange(videoRange, of: videoTrack, at: .zero)
+    try compositionVideo?.insertTimeRange(
+      CMTimeRange(start: videoRange.start, duration: length), of: videoTrack, at: .zero)
     // Keep portrait videos (Shorts, TikTok) the right way up
     compositionVideo?.preferredTransform = try await videoTrack.load(.preferredTransform)
 
     let compositionAudio = composition.addMutableTrack(
       withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
-    // Sound can be a few milliseconds longer than the picture: trim it
-    let audioDuration = CMTimeMinimum(audioRange.duration, videoRange.duration)
     try compositionAudio?.insertTimeRange(
-      CMTimeRange(start: audioRange.start, duration: audioDuration), of: audioTrack, at: .zero)
+      CMTimeRange(start: audioRange.start, duration: length), of: audioTrack, at: .zero)
 
     try? FileManager.default.removeItem(at: output)
 
