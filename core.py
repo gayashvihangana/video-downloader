@@ -26,8 +26,10 @@ import urllib.error
 import urllib.request
 from logging.handlers import RotatingFileHandler
 
-from PIL import Image
 from yt_dlp.postprocessor.common import PostProcessor
+
+# Pillow is imported only where pictures are resized (load_thumbnail), so the
+# phone app, which shows thumbnails itself, can use this module without it.
 
 # -------------------------------
 # APP INFO
@@ -1092,7 +1094,9 @@ def update_policy(release, current=APP_VERSION, now=None):
         return None
 
     now = time.time() if now is None else now
-    published = release.get("published") or now
+    published = release.get("published")
+    if published is None:
+        published = now  # unknown: the grace period starts now
     days_old = max(0.0, (now - published) / 86400)
     days_left = max(0, math.ceil(UPDATE_GRACE_DAYS - days_old))
 
@@ -1196,6 +1200,8 @@ def download_update(release, on_progress):
 def load_thumbnail(url, max_size=(132, 132)):
     """Download a thumbnail and shrink it to fit max_size (keeps proportions)."""
 
+    from PIL import Image
+
     request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
 
     with urllib.request.urlopen(request, timeout=10) as response:
@@ -1206,3 +1212,89 @@ def load_thumbnail(url, max_size=(132, 132)):
     image.thumbnail(max_size)
 
     return image
+
+
+# -------------------------------
+# PHONE APP (mobile/): what the Flutter app asks the Python side for
+# -------------------------------
+#
+# Phones can't run ffmpeg, so they download the media files themselves and
+# merge an H.264 video stream with an AAC audio stream without re-encoding.
+# That only works with MP4 (H.264) + M4A (AAC) over plain HTTPS, so these
+# helpers stick to those.
+
+PHONE_DIRECT = "[protocol^=http][protocol!*=dash][protocol!*=m3u8]"
+
+
+def mobile_format(mode, height=None):
+    """yt-dlp format selector for the phone app (no converting, no ffmpeg)."""
+
+    nw, direct = NO_WATERMARK, PHONE_DIRECT
+    m4a = f"ba[ext=m4a]{direct}"  # AAC audio, mergeable into MP4
+
+    if mode == AUDIO:
+        return f"{m4a}/ba[acodec^=mp4a]{direct}/ba{direct}{nw}"
+
+    h264 = f"[vcodec^=avc1][ext=mp4]{direct}{nw}"
+    steps = []
+
+    # Exactly the chosen height first, then the best below it, then any H.264
+    # (other links in the list may not have that height)
+    sizes = [f"[height={height}]", f"[height<={height}]"] if height else []
+    for size in [*sizes, ""]:
+        steps += [f"bv*{h264}{size}+{m4a}", f"b{h264}{size}"]
+
+    # Last resort: any single file with sound that downloads directly
+    steps.append(f"b{direct}{nw}")
+    return "/".join(steps)
+
+
+def mobile_summary(info):
+    """The preview for the phone app: like summarize_video, but only the
+    qualities a phone can save without converting (H.264), with those sizes."""
+
+    summary = summarize_video(info, need_audio_in_file=False)
+
+    qualities = []
+    for quality in summary["qualities"]:
+        if quality.get("h264"):
+            qualities.append(
+                {
+                    "label": quality["label"],
+                    "height": quality["height"],
+                    "size": quality["h264_size"],
+                    "approx": quality["h264_approx"],
+                }
+            )
+
+    return {**summary, "qualities": qualities, "has_video": bool(qualities)}
+
+
+def mobile_media(info):
+    """The files to fetch for an already-resolved yt-dlp info dict:
+    [{url, headers, ext, size, kind}] (one file, or video + audio to merge)."""
+
+    parts = info.get("requested_formats") or [info]
+    media = []
+
+    for part in parts:
+        vcodec = part.get("vcodec") or "none"
+        media.append(
+            {
+                "url": part["url"],
+                "headers": dict(part.get("http_headers") or {}),
+                "ext": part.get("ext") or "mp4",
+                "size": part.get("filesize") or part.get("filesize_approx") or 0,
+                "kind": "audio" if vcodec == "none" else "video",
+            }
+        )
+
+    return media
+
+
+def mobile_file_name(info, mode):
+    """ "Title [id].mp4" / ".m4a", safe on every phone file system."""
+
+    title = safe_name(clean_title(info) or info.get("title") or "Video", limit=80)
+    ext = "m4a" if mode == AUDIO else "mp4"
+    return f"{title} [{info.get('id', 'video')}].{ext}"
