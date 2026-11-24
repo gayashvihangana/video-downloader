@@ -95,9 +95,8 @@ DownloadTask partTask(
   MediaPart part, {
   bool wifiOnly = false,
   String displayName = '',
-  bool chunked = true,
 }) {
-  if (chunked && part.chunkSize > 0) {
+  if (part.chunkSize > 0) {
     return ParallelDownloadTask(
       taskId: '$id-$index',
       url: part.url,
@@ -143,6 +142,17 @@ int chunkCount(MediaPart part) {
   return (part.size / part.chunkSize).ceil().clamp(1, 16);
 }
 
+/// On iPhone, saving a video to Photos needs the user's OK, and the
+/// downloader only checks it (it never asks): ask here. Asked when a video
+/// download starts (the app is open then), and again before saving.
+Future<bool> canSaveToPhotos() async {
+  if (!Platform.isIOS) return true;
+  final permissions = FileDownloader().permissions;
+  const add = PermissionType.iosAddToPhotoLibrary;
+  if (await permissions.status(add) == PermissionStatus.granted) return true;
+  return await permissions.request(add) == PermissionStatus.granted;
+}
+
 /// Join the downloaded parts (if there are two) and put the result in the
 /// Gallery / Photos (video) or Music (audio). Returns what to open later:
 /// a file path, or on iOS a Photos identifier.
@@ -166,6 +176,13 @@ Future<String?> finishDownload({
     );
   } else {
     await File(paths.single).rename(output);
+  }
+
+  if (!audioOnly && !await canSaveToPhotos()) {
+    throw const MediaException(
+      "Couldn't save to Photos. Allow it in Settings › Video Downloader › "
+      'Photos (Add Photos Only), then try again.',
+    );
   }
 
   final saved = await FileDownloader().moveFileToSharedStorage(
