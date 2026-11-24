@@ -1,19 +1,26 @@
 package io.github.gayashvihangana.video_downloader
 
 import android.content.Intent
-import android.os.Bundle
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
     private var share: MethodChannel? = null
-    private var pendingLink: String? = null
+
+    companion object {
+        // Kept for the whole app, not this screen: Android may re-create the
+        // screen right after a share opens the app, and the link must survive
+        private var pendingLink: String? = null
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         // The app's own native piece: video + audio -> one MP4
         flutterEngine.plugins.add(MergePlugin())
+
+        // The app was opened by a share
+        sharedLink(intent)?.let { pendingLink = it }
 
         // "Share -> Video Downloader" from YouTube, TikTok, Instagram...
         share = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "video_downloader/share")
@@ -27,11 +34,6 @@ class MainActivity : FlutterActivity() {
                     }
                 }
             }
-    }
-
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        pendingLink = sharedLink(intent) // the app was opened by a share
     }
 
     override fun onNewIntent(intent: Intent) {

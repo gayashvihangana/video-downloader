@@ -233,7 +233,14 @@ class Downloads extends ChangeNotifier {
           _fail(item, _friendly(update));
         }
       case TaskStatus.canceled:
-        if (item.state != DownloadState.cancelled) _markCancelled(item);
+        // Not the user's Cancel (that marks the item first): the system
+        // stopped it. Try once more with fresh links, then give up.
+        if (!item.retriedExpiredLinks) {
+          item.retriedExpiredLinks = true;
+          unawaited(_restart(item));
+        } else {
+          _fail(item, 'The download was stopped. Try again.');
+        }
       case TaskStatus.enqueued || TaskStatus.waitingToRetry:
         break;
     }
@@ -312,11 +319,12 @@ class Downloads extends ChangeNotifier {
       switch (record.status) {
         case TaskStatus.complete:
           _finishedParts.putIfAbsent(item.id, () => {}).add(record.taskId);
-        case TaskStatus.failed || TaskStatus.notFound:
+        // Stopped while the app was closed: Android ends the app's background
+        // work when it's short of memory, which shows up as "canceled". The
+        // user's own Cancel never gets here (the item is already cancelled),
+        // so start it again with fresh links.
+        case TaskStatus.failed || TaskStatus.notFound || TaskStatus.canceled:
           return _restart(item);
-        case TaskStatus.canceled:
-          _markCancelled(item);
-          return;
         case TaskStatus.paused:
           item.state = DownloadState.paused;
         default:
@@ -356,7 +364,7 @@ class Downloads extends ChangeNotifier {
 
   Future<void> cancel(DownloadItem item) async {
     if (!item.state.active) return;
-    _markCancelled(item);
+    _markCancelled(item); // first, so the "canceled" updates are ignored
     await FileDownloader().cancelTasksWithIds(_taskIds(item));
     await _deleteWork(item);
   }

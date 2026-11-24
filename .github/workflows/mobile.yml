@@ -111,8 +111,15 @@ jobs:
           flutter analyze
           flutter test
 
+      # Once more if it fails: the Python download for each phone type now and
+      # then arrives broken on CI runners
       - name: Build the APK (packages Python + yt-dlp)
-        run: python tool/build.py android build apk --debug
+        run: |
+          python tool/build.py android build apk --debug || {
+            echo "Build failed; retrying once"
+            rm -rf ~/.gradle/caches/*/download build/serious_python* android/build
+            python tool/build.py android --skip-package build apk --debug
+          }
 
       - uses: actions/upload-artifact@v4
         with:
