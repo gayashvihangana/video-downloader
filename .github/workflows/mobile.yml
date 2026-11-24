@@ -46,6 +46,20 @@ jobs:
       - name: Build for the iPhone simulator (packages Python + yt-dlp)
         run: python tool/build.py ios build ios --simulator --debug
 
+      # The IPA first: it's what you install, so a stuck test can't block it
+      - name: Unsigned IPA for Sideloadly
+        run: |
+          python tool/build.py ios --skip-package build ios --release --no-codesign
+          mkdir -p build/ipa/Payload
+          cp -R build/ios/iphoneos/Runner.app build/ipa/Payload/
+          (cd build/ipa && zip -qry ../VideoDownloader-unsigned.ipa Payload)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios-unsigned-ipa
+          path: mobile/build/VideoDownloader-unsigned.ipa
+          retention-days: 14
+
       - name: Start an iPhone simulator
         id: simulator
         run: |
@@ -62,24 +76,10 @@ jobs:
           echo "udid=$UDID" >> "$GITHUB_OUTPUT"
 
       - name: Device tests on the simulator
+        timeout-minutes: 20
         run: |
           python3 -m http.server 8765 --bind 127.0.0.1 --directory integration_test/media &
-          python tool/build.py ios --skip-package test integration_test \
-            -d "${{ steps.simulator.outputs.udid }}" \
-            --dart-define=TEST_SERVER=http://127.0.0.1:8765
-
-      - name: Unsigned IPA for Sideloadly
-        run: |
-          python tool/build.py ios build ios --release --no-codesign
-          mkdir -p build/ipa/Payload
-          cp -R build/ios/iphoneos/Runner.app build/ipa/Payload/
-          (cd build/ipa && zip -qry ../VideoDownloader-unsigned.ipa Payload)
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ios-unsigned-ipa
-          path: mobile/build/VideoDownloader-unsigned.ipa
-          retention-days: 14
+          python tool/build.py ios --skip-package test integration_test             -d "${{ steps.simulator.outputs.udid }}"             --dart-define=TEST_SERVER=http://127.0.0.1:8765             --reporter expanded
 
   android:
     runs-on: ubuntu-latest

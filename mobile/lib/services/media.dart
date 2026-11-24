@@ -76,12 +76,19 @@ Future<Directory> workFolder(String id) async {
 
 /// The background download of one part (survives the app being in the
 /// background; pause / resume continue where it stopped).
-DownloadTask partTask(String id, int index, MediaPart part, {bool wifiOnly = false}) {
+DownloadTask partTask(
+  String id,
+  int index,
+  MediaPart part, {
+  bool wifiOnly = false,
+  String displayName = '',
+}) {
   return DownloadTask(
     taskId: '$id-$index',
     url: part.url,
     headers: part.headers,
     filename: '${part.kind}.${part.ext}',
+    displayName: displayName,
     directory: 'work/$id',
     baseDirectory: BaseDirectory.applicationSupport,
     group: id,

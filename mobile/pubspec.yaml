@@ -37,6 +37,8 @@ dependencies:
   serious_python: 6.1.2
   path_provider: ^2.1.6
   background_downloader: ^9.6.6
+  shared_preferences: ^2.5.6
+  package_info_plus: ^10.2.2
 
 dev_dependencies:
   flutter_test:

@@ -1235,7 +1235,9 @@ def mobile_format(mode, height=None):
     if mode == AUDIO:
         return f"{m4a}/ba[acodec^=mp4a]{direct}/ba{direct}{nw}"
 
-    h264 = f"[vcodec^=avc1][ext=mp4]{direct}{nw}"
+    # "^=?": also MP4s whose codec isn't stated (direct files from smaller
+    # sites), which are H.264 in practice
+    h264 = f"[vcodec^=?avc1][ext=mp4]{direct}{nw}"
     steps = []
 
     # Exactly the chosen height first, then the best below it, then any H.264
@@ -1253,7 +1255,28 @@ def mobile_summary(info):
     """The preview for the phone app: like summarize_video, but only the
     qualities a phone can save without converting (H.264), with those sizes."""
 
+    entries = [e for e in info.get("entries") or [] if e]
+    video = info if info.get("formats") or not entries else entries[0]
+
+    # MP4s whose codecs aren't stated (direct files from smaller sites) are
+    # H.264 + AAC in practice; mobile_format accepts them the same way
+    formats = []
+    for fmt in video.get("formats") or []:
+        if fmt.get("ext") == "mp4" and fmt.get("vcodec") is None and fmt.get("height"):
+            fmt = {**fmt, "vcodec": "avc1", "acodec": fmt.get("acodec") or "mp4a"}
+        formats.append(fmt)
+    if video is info:
+        info = {**info, "formats": formats}
+    else:
+        info = {**info, "entries": [{**video, "formats": formats}, *entries[1:]]}
+
     summary = summarize_video(info, need_audio_in_file=False)
+
+    # Sound on its own (for "Audio"): only if the site offers it separately
+    audio_only = any(
+        f.get("vcodec") == "none" and f.get("acodec") not in (None, "none")
+        for f in formats
+    )
 
     qualities = []
     for quality in summary["qualities"]:
@@ -1267,7 +1290,12 @@ def mobile_summary(info):
                 }
             )
 
-    return {**summary, "qualities": qualities, "has_video": bool(qualities)}
+    return {
+        **summary,
+        "qualities": qualities,
+        "has_video": bool(qualities),
+        "has_audio_only": audio_only,
+    }
 
 
 def mobile_media(info):

@@ -109,6 +109,27 @@ def test_summary_only_offers_qualities_a_phone_can_save():
     assert summary["site"] == "YouTube"
 
 
+ARCHIVE_LIKE = [  # direct files, no codec information (archive.org)
+    {**fmt("0", 300, ext="ogv"), "vcodec": None, "acodec": None},
+    {**fmt("1", 360, ext="mp4"), "vcodec": None, "acodec": None},
+    {**fmt("2", 720, ext="avi"), "vcodec": None, "acodec": None},
+]
+
+
+def test_mp4_without_codec_information_counts_as_h264():
+    assert ids(resolve(ARCHIVE_LIKE, core.VIDEO)) == ["1"]
+    assert ids(resolve(ARCHIVE_LIKE, core.VIDEO, 360)) == ["1"]
+
+    summary = core.mobile_summary({"title": "x", "formats": ARCHIVE_LIKE})
+    assert [q["label"] for q in summary["qualities"]] == ["360p"]
+    assert summary["has_audio_only"] is False  # no separate sound to offer
+
+
+def test_audio_is_offered_only_when_the_site_has_sound_on_its_own():
+    summary = core.mobile_summary({"title": "x", "formats": YOUTUBE_LIKE})
+    assert summary["has_audio_only"] is True
+
+
 def test_file_names():
     info = {"id": "abc", "title": 'A/B: "quoted" #tag'}
     assert core.mobile_file_name(info, core.VIDEO).endswith(" [abc].mp4")

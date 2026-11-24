@@ -1,121 +1,160 @@
-import 'package:flutter/material.dart';
+import 'dart:async';
+import 'dart:io';
 
-void main() {
-  runApp(const MyApp());
+import 'package:background_downloader/background_downloader.dart';
+import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import 'screens/downloads.dart';
+import 'screens/home.dart';
+import 'screens/settings.dart';
+import 'services/downloads.dart';
+import 'services/python_api.dart';
+import 'services/settings.dart';
+import 'services/share.dart';
+
+/// Same accent as the desktop app (ui/theme.py)
+const accent = Color(0xFFE5484D);
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  final prefs = await SharedPreferences.getInstance();
+  final settings = Settings(prefs);
+  final downloads = Downloads(prefs)..wifiOnly = settings.wifiOnly;
+  await downloads.start();
+
+  // Start the download engine now, so the first link is quick
+  unawaited(PythonApi.instance.then((_) {}, onError: (_) {}));
+
+  runApp(VideoDownloaderApp(settings: settings, downloads: downloads));
 }
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+class VideoDownloaderApp extends StatelessWidget {
+  const VideoDownloaderApp({
+    super.key,
+    required this.settings,
+    required this.downloads,
+  });
 
-  // This widget is the root of your application.
+  final Settings settings;
+  final Downloads downloads;
+
+  ThemeData _theme(Brightness brightness) => ThemeData(
+    useMaterial3: true,
+    colorScheme: ColorScheme.fromSeed(
+      seedColor: accent,
+      brightness: brightness,
+    ),
+  );
+
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Flutter Demo',
-      theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // TRY THIS: Try running your application with "flutter run". You'll see
-        // the application has a purple toolbar. Then, without quitting the app,
-        // try changing the seedColor in the colorScheme below to Colors.green
-        // and then invoke "hot reload" (save your changes or press the "hot
-        // reload" button in a Flutter-supported IDE, or press "r" if you used
-        // the command line to start the app).
-        //
-        // Notice that the counter didn't reset back to zero; the application
-        // state is not lost during the reload. To reset the state, use hot
-        // restart instead.
-        //
-        // This works for code too, not just values: Most code changes can be
-        // tested with just a hot reload.
-        colorScheme: .fromSeed(seedColor: Colors.deepPurple),
+    return ListenableBuilder(
+      listenable: settings,
+      builder: (context, _) => MaterialApp(
+        title: 'Video Downloader',
+        debugShowCheckedModeBanner: false,
+        theme: _theme(Brightness.light),
+        darkTheme: _theme(Brightness.dark),
+        themeMode: settings.themeMode,
+        home: AppShell(settings: settings, downloads: downloads),
       ),
-      home: const MyHomePage(title: 'Flutter Demo Home Page'),
     );
   }
 }
 
-class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key, required this.title});
+/// Home · Downloads · Settings (like the desktop app's sidebar)
+class AppShell extends StatefulWidget {
+  const AppShell({super.key, required this.settings, required this.downloads});
 
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
-
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
-
-  final String title;
+  final Settings settings;
+  final Downloads downloads;
 
   @override
-  State<MyHomePage> createState() => _MyHomePageState();
+  State<AppShell> createState() => _AppShellState();
 }
 
-class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
+class _AppShellState extends State<AppShell> {
+  int _page = 0;
+  final _sharedLink = ValueNotifier<String?>(null);
 
-  void _incrementCounter() {
-    setState(() {
-      // This call to setState tells the Flutter framework that something has
-      // changed in this State, which causes it to rerun the build method below
-      // so that the display can reflect the updated values. If we changed
-      // _counter without calling setState(), then the build method would not be
-      // called again, and so nothing would appear to happen.
-      _counter++;
+  @override
+  void initState() {
+    super.initState();
+
+    // "Share -> Video Downloader": open Home with the link
+    ShareReceiver.listen((link) {
+      _sharedLink.value = link;
+      setState(() => _page = 0);
     });
+
+    // Android 13+: allow the progress notification (asked once)
+    if (Platform.isAndroid) {
+      unawaited(
+        FileDownloader().permissions.request(PermissionType.notifications),
+      );
+    }
   }
 
   @override
+  void dispose() {
+    _sharedLink.dispose();
+    super.dispose();
+  }
+
+  void _go(int page) => setState(() => _page = page);
+
+  @override
   Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
+    final pages = [
+      HomeScreen(
+        downloads: widget.downloads,
+        settings: widget.settings,
+        sharedLink: _sharedLink,
+        onGoToDownloads: () => _go(1),
+      ),
+      DownloadsScreen(downloads: widget.downloads, onGoHome: () => _go(0)),
+      SettingsScreen(settings: widget.settings, downloads: widget.downloads),
+    ];
+
     return Scaffold(
-      appBar: AppBar(
-        // TRY THIS: Try changing the color here to a specific color (to
-        // Colors.amber, perhaps?) and trigger a hot reload to see the AppBar
-        // change color while the other colors stay the same.
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
-        title: Text(widget.title),
-      ),
-      body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
-        child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          //
-          // TRY THIS: Invoke "debug painting" (choose the "Toggle Debug Paint"
-          // action in the IDE, or press "p" in the console), to see the
-          // wireframe for each widget.
-          mainAxisAlignment: .center,
-          children: [
-            const Text('You have pushed the button this many times:'),
-            Text(
-              '$_counter',
-              style: Theme.of(context).textTheme.headlineMedium,
-            ),
-          ],
-        ),
-      ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _incrementCounter,
-        tooltip: 'Increment',
-        child: const Icon(Icons.add),
+      // Keep each page's state (typed link, scroll) when switching tabs
+      body: IndexedStack(index: _page, children: pages),
+      bottomNavigationBar: ListenableBuilder(
+        listenable: widget.downloads,
+        builder: (context, _) {
+          final running = widget.downloads.current.length;
+          return NavigationBar(
+            selectedIndex: _page,
+            onDestinationSelected: _go,
+            destinations: [
+              const NavigationDestination(
+                icon: Icon(Icons.home_outlined),
+                selectedIcon: Icon(Icons.home_rounded),
+                label: 'Home',
+              ),
+              NavigationDestination(
+                icon: Badge(
+                  isLabelVisible: running > 0,
+                  label: Text('$running'),
+                  child: const Icon(Icons.download_outlined),
+                ),
+                selectedIcon: Badge(
+                  isLabelVisible: running > 0,
+                  label: Text('$running'),
+                  child: const Icon(Icons.download_rounded),
+                ),
+                label: 'Downloads',
+              ),
+              const NavigationDestination(
+                icon: Icon(Icons.settings_outlined),
+                selectedIcon: Icon(Icons.settings_rounded),
+                label: 'Settings',
+              ),
+            ],
+          );
+        },
       ),
     );
   }
