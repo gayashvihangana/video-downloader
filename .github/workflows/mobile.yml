@@ -111,18 +111,25 @@ jobs:
           flutter analyze
           flutter test
 
+      # Release APKs, one per phone type (much smaller than one for all).
       # Once more if it fails: the Python download for each phone type now and
-      # then arrives broken on CI runners
-      - name: Build the APK (packages Python + yt-dlp)
+      # then arrives broken on CI runners.
+      - name: Build the APKs (packages Python + yt-dlp)
         run: |
-          python tool/build.py android build apk --debug || {
+          build() { python tool/build.py android "$@" build apk --release --split-per-abi; }
+          build || {
             echo "Build failed; retrying once"
             rm -rf ~/.gradle/caches/*/download build/serious_python* android/build
-            python tool/build.py android --skip-package build apk --debug
+            build --skip-package
           }
+          cd build/app/outputs/flutter-apk
+          for abi in arm64-v8a armeabi-v7a x86_64; do
+            mv "app-$abi-release.apk" "VideoDownloader-$abi.apk"
+          done
+          ls -la
 
       - uses: actions/upload-artifact@v4
         with:
           name: android-apk
-          path: mobile/build/app/outputs/flutter-apk/app-debug.apk
+          path: mobile/build/app/outputs/flutter-apk/VideoDownloader-*.apk
           retention-days: 14
