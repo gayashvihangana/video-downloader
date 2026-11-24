@@ -199,13 +199,17 @@ class SectionTitle extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(4, 0, 0, 10),
       child: Row(
         children: [
-          Text(
-            title.toUpperCase(),
-            style: TextStyle(
-              color: p.muted,
-              fontSize: 12.5,
-              fontWeight: FontWeight.w700,
-              letterSpacing: 1.1,
+          Flexible(
+            child: Text(
+              title.toUpperCase(),
+              style: TextStyle(
+                color: p.muted,
+                fontSize: 12.5,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 1.1,
+              ),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
             ),
           ),
           if (count != null && count! > 0) ...[

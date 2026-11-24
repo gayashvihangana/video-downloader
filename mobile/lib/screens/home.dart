@@ -453,18 +453,24 @@ class _Brand extends StatelessWidget {
       children: [
         const AppLogo(size: 38),
         const SizedBox(width: 12),
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'Video Downloader',
-              style: Theme.of(context).textTheme.titleMedium,
-            ),
-            Text(
-              'Videos & music, saved to your phone',
-              style: TextStyle(color: p.muted, fontSize: 12.5),
-            ),
-          ],
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Video Downloader',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+              Text(
+                'Videos & music, saved to your phone',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(color: p.muted, fontSize: 12.5),
+              ),
+            ],
+          ),
         ),
       ],
     );
