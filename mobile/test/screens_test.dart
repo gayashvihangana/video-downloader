@@ -172,7 +172,7 @@ void main() {
         brightness,
       );
       expect(find.text('Paste'), findsOneWidget);
-      expect(find.text('How it works'), findsOneWidget);
+      expect(find.text('New Download'), findsOneWidget);
     });
 
     testWidgets('Home, link looked up (${brightness.name})', (tester) async {
@@ -187,7 +187,7 @@ void main() {
         ),
         brightness,
       );
-      expect(find.text('Download'), findsOneWidget);
+      expect(find.text('Download · 182 MB'), findsOneWidget);
       expect(find.text('1080p'), findsOneWidget);
       expect(find.text('182 MB'), findsWidgets);
     });
@@ -200,11 +200,11 @@ void main() {
         DownloadsScreen(downloads: downloads, onGoHome: () {}),
         brightness,
       );
-      expect(find.text('In progress'.toUpperCase()), findsOneWidget);
+      expect(find.text('Downloading'), findsOneWidget);
       expect(find.byTooltip('Pause'), findsOneWidget);
       expect(find.byTooltip('Resume'), findsOneWidget);
       expect(find.text('This video is private.'), findsOneWidget);
-      expect(find.text('Retry failed'), findsOneWidget);
+      expect(find.text('Retry Failed'), findsOneWidget);
     });
 
     testWidgets('Downloads, empty (${brightness.name})', (tester) async {
@@ -214,7 +214,7 @@ void main() {
         DownloadsScreen(downloads: downloads, onGoHome: () {}),
         brightness,
       );
-      expect(find.text('No downloads yet'), findsOneWidget);
+      expect(find.text('No Downloads'), findsOneWidget);
     });
 
     testWidgets('Settings (${brightness.name})', (tester) async {
@@ -225,7 +225,7 @@ void main() {
         brightness,
       );
       expect(find.text('Wi-Fi only'), findsOneWidget);
-      expect(find.text('Version 1.0.2'), findsOneWidget);
+      expect(find.text('1.0.2'), findsOneWidget);
     });
   }
 }

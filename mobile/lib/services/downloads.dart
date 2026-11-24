@@ -136,6 +136,7 @@ class Downloads extends ChangeNotifier {
       item
         ..title = item.title.isNotEmpty ? item.title : result['title'] as String
         ..fileName = result['file_name'] as String
+        ..duration = (result['duration'] as num?)?.toDouble() ?? 0
         ..thumbnailUrl ??= result['thumbnail_url'] as String?
         ..parts = [
           for (final part in result['media'] as List)
@@ -291,6 +292,7 @@ class Downloads extends ChangeNotifier {
         tasks: _tasks(item),
         fileName: item.fileName,
         audioOnly: item.audioOnly,
+        duration: item.duration,
       );
       item
         ..state = DownloadState.done

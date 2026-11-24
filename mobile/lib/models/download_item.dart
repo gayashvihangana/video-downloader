@@ -33,6 +33,7 @@ class DownloadItem {
     this.size = 0,
     this.error = '',
     this.finishedAt,
+    this.duration = 0,
   });
 
   factory DownloadItem.fromJson(Map<String, dynamic> json) => DownloadItem(
@@ -57,6 +58,7 @@ class DownloadItem {
     finishedAt: json['finishedAt'] == null
         ? null
         : DateTime.fromMillisecondsSinceEpoch(json['finishedAt'] as int),
+    duration: (json['duration'] as num?)?.toDouble() ?? 0,
   );
 
   final String id;
@@ -75,6 +77,7 @@ class DownloadItem {
   int size;
   String error;
   DateTime? finishedAt;
+  double duration; // seconds, as the site says (0 = not known)
 
   // Live only (not saved)
   double progress = 0;
@@ -143,5 +146,6 @@ class DownloadItem {
     'size': size,
     'error': error,
     'finishedAt': finishedAt?.millisecondsSinceEpoch,
+    'duration': duration,
   };
 }

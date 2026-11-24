@@ -52,12 +52,16 @@ class Merger {
     required String video,
     required String audio,
     required String output,
+    double duration = 0, // the real length (seconds), if known
   }) async {
     try {
       await _channel.invokeMethod<String>('merge', {
         'video': video,
         'audio': audio,
         'output': output,
+        // The iPhone joiner trusts the files' own length, which can be
+        // wrong: it cuts the result to this (sent as text, like the rest)
+        if (duration > 0) 'duration': '$duration',
       });
     } on PlatformException catch (error) {
       throw MediaException(
@@ -161,6 +165,7 @@ Future<String?> finishDownload({
   required List<DownloadTask> tasks,
   required String fileName,
   required bool audioOnly,
+  double duration = 0,
 }) async {
   final folder = await workFolder(id);
   final output = '${folder.path}/$fileName';
@@ -173,6 +178,7 @@ Future<String?> finishDownload({
       video: paths[video],
       audio: paths[1 - video],
       output: output,
+      duration: duration,
     );
   } else {
     await File(paths.single).rename(output);

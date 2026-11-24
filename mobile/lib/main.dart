@@ -117,27 +117,29 @@ class _AppShellState extends State<AppShell> {
           final running = widget.downloads.current.length;
           return DecoratedBox(
             decoration: BoxDecoration(
-              border: Border(top: BorderSide(color: context.palette.border)),
+              border: Border(
+                top: BorderSide(color: context.palette.separator, width: 0.5),
+              ),
             ),
             child: NavigationBar(
               selectedIndex: _page,
               onDestinationSelected: _go,
               destinations: [
                 const NavigationDestination(
-                  icon: Icon(Icons.home_outlined),
-                  selectedIcon: Icon(Icons.home_rounded),
-                  label: 'Home',
+                  icon: Icon(Icons.add_circle_outline_rounded),
+                  selectedIcon: Icon(Icons.add_circle_rounded),
+                  label: 'New',
                 ),
                 NavigationDestination(
                   icon: Badge(
                     isLabelVisible: running > 0,
                     label: Text('$running'),
-                    child: const Icon(Icons.download_outlined),
+                    child: const Icon(Icons.download_for_offline_outlined),
                   ),
                   selectedIcon: Badge(
                     isLabelVisible: running > 0,
                     label: Text('$running'),
-                    child: const Icon(Icons.download_rounded),
+                    child: const Icon(Icons.download_for_offline_rounded),
                   ),
                   label: 'Downloads',
                 ),
