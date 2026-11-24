@@ -76,7 +76,7 @@ void main() {
         ..timeLeft = const Duration(seconds: 65);
 
       expect(item.meta, 'YouTube  ·  Video  ·  1080p');
-      expect(item.statusText, '50%  ·  20 MB of 40 MB  ·  2.5 MB/s  ·  1:05 left');
+      expect(item.statusText, '50% · 20 MB of 40 MB · 2.5 MB/s · 1:05 left');
 
       item.state = DownloadState.paused;
       expect(item.statusText, 'Paused at 50%');
@@ -88,7 +88,12 @@ void main() {
     });
 
     test('audio says M4A', () {
-      final item = DownloadItem(id: '2', url: 'u', mode: 'Audio', site: 'TikTok');
+      final item = DownloadItem(
+        id: '2',
+        url: 'u',
+        mode: 'Audio',
+        site: 'TikTok',
+      );
       expect(item.meta, 'TikTok  ·  Audio  ·  M4A');
     });
   });
@@ -126,11 +131,11 @@ void main() {
       ),
     );
 
-    expect(find.text('Current downloads (1)'), findsOneWidget);
+    expect(find.text('IN PROGRESS'), findsOneWidget);
     expect(find.text('Running now'), findsOneWidget);
     expect(find.byTooltip('Pause'), findsOneWidget);
     expect(find.text('Broken one'), findsOneWidget);
-    expect(find.text('✕  This video is private.'), findsOneWidget);
+    expect(find.text('This video is private.'), findsOneWidget);
     expect(find.text('Retry failed'), findsOneWidget);
     expect(find.byTooltip('Try again'), findsOneWidget);
   });

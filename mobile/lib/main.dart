@@ -12,9 +12,7 @@ import 'services/downloads.dart';
 import 'services/python_api.dart';
 import 'services/settings.dart';
 import 'services/share.dart';
-
-/// Same accent as the desktop app (ui/theme.py)
-const accent = Color(0xFFE5484D);
+import 'ui/theme.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -40,14 +38,6 @@ class VideoDownloaderApp extends StatelessWidget {
   final Settings settings;
   final Downloads downloads;
 
-  ThemeData _theme(Brightness brightness) => ThemeData(
-    useMaterial3: true,
-    colorScheme: ColorScheme.fromSeed(
-      seedColor: accent,
-      brightness: brightness,
-    ),
-  );
-
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
@@ -55,8 +45,8 @@ class VideoDownloaderApp extends StatelessWidget {
       builder: (context, _) => MaterialApp(
         title: 'Video Downloader',
         debugShowCheckedModeBanner: false,
-        theme: _theme(Brightness.light),
-        darkTheme: _theme(Brightness.dark),
+        theme: buildTheme(Brightness.light),
+        darkTheme: buildTheme(Brightness.dark),
         themeMode: settings.themeMode,
         home: AppShell(settings: settings, downloads: downloads),
       ),
@@ -125,34 +115,39 @@ class _AppShellState extends State<AppShell> {
         listenable: widget.downloads,
         builder: (context, _) {
           final running = widget.downloads.current.length;
-          return NavigationBar(
-            selectedIndex: _page,
-            onDestinationSelected: _go,
-            destinations: [
-              const NavigationDestination(
-                icon: Icon(Icons.home_outlined),
-                selectedIcon: Icon(Icons.home_rounded),
-                label: 'Home',
-              ),
-              NavigationDestination(
-                icon: Badge(
-                  isLabelVisible: running > 0,
-                  label: Text('$running'),
-                  child: const Icon(Icons.download_outlined),
+          return DecoratedBox(
+            decoration: BoxDecoration(
+              border: Border(top: BorderSide(color: context.palette.border)),
+            ),
+            child: NavigationBar(
+              selectedIndex: _page,
+              onDestinationSelected: _go,
+              destinations: [
+                const NavigationDestination(
+                  icon: Icon(Icons.home_outlined),
+                  selectedIcon: Icon(Icons.home_rounded),
+                  label: 'Home',
                 ),
-                selectedIcon: Badge(
-                  isLabelVisible: running > 0,
-                  label: Text('$running'),
-                  child: const Icon(Icons.download_rounded),
+                NavigationDestination(
+                  icon: Badge(
+                    isLabelVisible: running > 0,
+                    label: Text('$running'),
+                    child: const Icon(Icons.download_outlined),
+                  ),
+                  selectedIcon: Badge(
+                    isLabelVisible: running > 0,
+                    label: Text('$running'),
+                    child: const Icon(Icons.download_rounded),
+                  ),
+                  label: 'Downloads',
                 ),
-                label: 'Downloads',
-              ),
-              const NavigationDestination(
-                icon: Icon(Icons.settings_outlined),
-                selectedIcon: Icon(Icons.settings_rounded),
-                label: 'Settings',
-              ),
-            ],
+                const NavigationDestination(
+                  icon: Icon(Icons.settings_outlined),
+                  selectedIcon: Icon(Icons.settings_rounded),
+                  label: 'Settings',
+                ),
+              ],
+            ),
           );
         },
       ),
