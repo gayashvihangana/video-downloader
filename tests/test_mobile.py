@@ -97,6 +97,17 @@ def test_media_lists_the_files_to_fetch():
     ]
     assert media[0]["url"] == "https://cdn.example/136"
     assert media[0]["headers"]["User-Agent"] == "UA"
+    assert [m["chunk_size"] for m in media] == [0, 0]
+
+
+def test_media_keeps_youtubes_chunk_size():
+    info = {
+        "url": "https://cdn.example/v",
+        "ext": "mp4",
+        "vcodec": "avc1",
+        "downloader_options": {"http_chunk_size": 10 << 20},
+    }
+    assert core.mobile_media(info)[0]["chunk_size"] == 10 << 20
 
 
 def test_summary_only_offers_qualities_a_phone_can_save():
