@@ -56,6 +56,7 @@ void main() {
     expect((tasks[0] as ParallelDownloadTask).chunks, 3);
     expect(tasks[1], isNot(isA<ParallelDownloadTask>()));
 
+    await makeWorkFolder(id);
     final progress = <double>[];
     for (final task in tasks) {
       final result = await FileDownloader().download(

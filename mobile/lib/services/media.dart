@@ -81,6 +81,12 @@ Future<Directory> workFolder(String id) async {
   return Directory('${base.path}/work/$id');
 }
 
+/// Make the work folder before downloading: a download in pieces puts the
+/// pieces together there, and (unlike a plain one) doesn't create it.
+Future<void> makeWorkFolder(String id) async {
+  await (await workFolder(id)).create(recursive: true);
+}
+
 /// The background download of one part (survives the app being in the
 /// background; pause / resume continue where it stopped).
 DownloadTask partTask(

@@ -144,6 +144,7 @@ class Downloads extends ChangeNotifier {
       item.state = DownloadState.waiting;
       _changed();
 
+      await makeWorkFolder(item.id);
       for (var i = 0; i < item.parts.length; i++) {
         var task = _task(item, i);
         var started = await FileDownloader().enqueue(task);
