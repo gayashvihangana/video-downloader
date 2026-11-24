@@ -18,7 +18,8 @@ env:
 
 jobs:
   ios:
-    runs-on: macos-15
+    # Xcode 26 (iOS 26 SDK): connectivity_plus, used by the downloader, needs it
+    runs-on: macos-26
     timeout-minutes: 75
     defaults:
       run:
@@ -38,6 +39,7 @@ jobs:
 
       - name: Checks
         run: |
+          xcodebuild -version
           flutter pub get
           flutter analyze
 
