@@ -3,8 +3,9 @@
 // and the result is saved to the Gallery.
 //
 // Needs the test files (integration_test/media: 4 s of H.264 video without
-// sound, and 4 s of AAC sound) served from the computer:
-//   python -m http.server 8765 --directory integration_test/media
+// sound, and 4 s of AAC sound) served from the computer, with byte ranges
+// (the video is fetched in pieces, as YouTube files are):
+//   python tool/serve_media.py 8765
 //   python tool/build.py android --skip-package test integration_test/download_test.dart
 // The Android emulator reaches the computer at 10.0.2.2; the iOS simulator
 // at 127.0.0.1 (--dart-define=TEST_SERVER=http://127.0.0.1:8765).
@@ -36,6 +37,7 @@ void main() {
         ext: 'mp4',
         size: 28436,
         kind: 'video',
+        chunkSize: 10000, // 3 pieces
       ),
       const MediaPart(
         url: '$server/audio.m4a',
@@ -50,6 +52,10 @@ void main() {
       for (var i = 0; i < parts.length; i++) partTask(id, i, parts[i]),
     ];
 
+    expect(tasks[0], isA<ParallelDownloadTask>());
+    expect((tasks[0] as ParallelDownloadTask).chunks, 3);
+    expect(tasks[1], isNot(isA<ParallelDownloadTask>()));
+
     final progress = <double>[];
     for (final task in tasks) {
       final result = await FileDownloader().download(
@@ -59,6 +65,17 @@ void main() {
       expect(result.status, TaskStatus.complete, reason: '${result.exception}');
     }
     expect(progress, isNotEmpty);
+
+    // The pieces were put back together exactly
+    final video = File(await tasks[0].filePath());
+    expect(await video.length(), 28436);
+    final original = await HttpClient()
+        .getUrl(Uri.parse('$server/video.mp4'))
+        .then((request) => request.close())
+        .then(
+          (response) => response.fold<List<int>>([], (a, b) => a..addAll(b)),
+        );
+    expect(await video.readAsBytes(), original);
 
     // Merge on its own first, to check the joined file
     final folder = await workFolder(id);

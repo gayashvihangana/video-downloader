@@ -12,6 +12,7 @@ class MediaPart {
     required this.ext,
     required this.size,
     required this.kind,
+    this.chunkSize = 0,
   });
 
   factory MediaPart.fromJson(Map<String, dynamic> json) => MediaPart(
@@ -20,6 +21,7 @@ class MediaPart {
     ext: json['ext'] as String? ?? 'mp4',
     size: (json['size'] as num?)?.toInt() ?? 0,
     kind: json['kind'] as String? ?? 'video',
+    chunkSize: (json['chunk_size'] as num?)?.toInt() ?? 0,
   );
 
   final String url;
@@ -28,12 +30,17 @@ class MediaPart {
   final int size;
   final String kind; // "video" (may include sound) or "audio"
 
+  /// > 0: fetch in pieces of at most this many bytes (YouTube slows a single
+  /// request for the whole file down to a crawl; yt-dlp uses 10 MB pieces)
+  final int chunkSize;
+
   Map<String, dynamic> toJson() => {
     'url': url,
     'headers': headers,
     'ext': ext,
     'size': size,
     'kind': kind,
+    'chunk_size': chunkSize,
   };
 }
 
@@ -82,7 +89,30 @@ DownloadTask partTask(
   MediaPart part, {
   bool wifiOnly = false,
   String displayName = '',
+  bool chunked = true,
 }) {
+  if (chunked && part.chunkSize > 0) {
+    return ParallelDownloadTask(
+      taskId: '$id-$index',
+      url: part.url,
+      headers: {
+        ...part.headers,
+        // the size yt-dlp reported, in case the server doesn't say
+        if (part.size > 0) 'Known-Content-Length': '${part.size}',
+      },
+      chunks: chunkCount(part),
+      filename: '${part.kind}.${part.ext}',
+      displayName: displayName,
+      directory: 'work/$id',
+      baseDirectory: BaseDirectory.applicationSupport,
+      group: id,
+      updates: Updates.statusAndProgress,
+      requiresWiFi: wifiOnly,
+      retries: 3,
+      allowPause: true,
+      metaData: part.kind,
+    );
+  }
   return DownloadTask(
     taskId: '$id-$index',
     url: part.url,
@@ -98,6 +128,13 @@ DownloadTask partTask(
     allowPause: true,
     metaData: part.kind,
   );
+}
+
+/// Pieces of at most [MediaPart.chunkSize] (4 when the size isn't known),
+/// and at most 16 at once so the site isn't flooded.
+int chunkCount(MediaPart part) {
+  if (part.size <= 0) return 4;
+  return (part.size / part.chunkSize).ceil().clamp(1, 16);
 }
 
 /// Join the downloaded parts (if there are two) and put the result in the

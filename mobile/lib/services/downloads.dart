@@ -20,7 +20,8 @@ class Downloads extends ChangeNotifier {
   Downloads(this._prefs);
 
   static const _key = 'downloads';
-  static const maxAtOnce = 3; // downloads running at once (as on desktop)
+  // Pieces fetched at once, over all downloads (YouTube files come in pieces)
+  static const maxPiecesAtOnce = 8;
   static const historyLimit = 100;
 
   final SharedPreferences _prefs;
@@ -39,7 +40,9 @@ class Downloads extends ChangeNotifier {
   Future<void> start() async {
     for (final json in jsonDecode(_prefs.getString(_key) ?? '[]') as List) {
       try {
-        items.add(DownloadItem.fromJson(Map<String, dynamic>.from(json as Map)));
+        items.add(
+          DownloadItem.fromJson(Map<String, dynamic>.from(json as Map)),
+        );
       } catch (_) {
         // an unreadable old entry isn't worth failing over
       }
@@ -47,11 +50,12 @@ class Downloads extends ChangeNotifier {
 
     final downloader = FileDownloader();
     await downloader.start();
-    // Each download has up to 2 parts (video + sound)
+    // A limit per group: each download is a group of up to 2 parts (video
+    // + sound), and all pieces share one group. No overall limit: a download
+    // fetched in pieces holds its place until its pieces are done, so a full
+    // queue of those would wait forever for pieces that can't start.
     await downloader.configure(
-      globalConfig: [
-        (Config.holdingQueue, (maxAtOnce * 2, null, null)),
-      ],
+      globalConfig: [(Config.holdingQueue, (null, null, maxPiecesAtOnce))],
     );
     downloader.configureNotification(
       running: const TaskNotification('Downloading', '{displayName}'),
@@ -140,8 +144,16 @@ class Downloads extends ChangeNotifier {
       item.state = DownloadState.waiting;
       _changed();
 
-      for (final task in _tasks(item)) {
-        if (!await FileDownloader().enqueue(task)) {
+      for (var i = 0; i < item.parts.length; i++) {
+        var task = _task(item, i);
+        var started = await FileDownloader().enqueue(task);
+        if (!started && task is ParallelDownloadTask) {
+          // The server won't hand out pieces: fetch the file in one go
+          item.chunked = false;
+          task = _task(item, i);
+          started = await FileDownloader().enqueue(task);
+        }
+        if (!started) {
           _fail(item, "Couldn't start the download. Try again.");
           return;
         }
@@ -151,15 +163,17 @@ class Downloads extends ChangeNotifier {
     }
   }
 
+  DownloadTask _task(DownloadItem item, int index) => partTask(
+    item.id,
+    index,
+    item.parts[index],
+    wifiOnly: wifiOnly,
+    displayName: item.name,
+    chunked: item.chunked,
+  );
+
   List<DownloadTask> _tasks(DownloadItem item) => [
-    for (var i = 0; i < item.parts.length; i++)
-      partTask(
-        item.id,
-        i,
-        item.parts[i],
-        wifiOnly: wifiOnly,
-        displayName: item.name,
-      ),
+    for (var i = 0; i < item.parts.length; i++) _task(item, i),
   ];
 
   // ---------- progress from the background downloader ----------
@@ -223,11 +237,14 @@ class Downloads extends ChangeNotifier {
         // Links from YouTube & co. expire after a few hours (a long pause):
         // ask yt-dlp for fresh ones once, and start again
         final code = update.responseStatusCode;
-        final expired = update.status == TaskStatus.notFound ||
-            code == 403 ||
-            code == 410;
+        final expired =
+            update.status == TaskStatus.notFound || code == 403 || code == 410;
         if (expired && !item.retriedExpiredLinks) {
           item.retriedExpiredLinks = true;
+          unawaited(_restart(item));
+        } else if (update.task is ParallelDownloadTask && item.chunked) {
+          // Downloading in pieces didn't work here: once more in one go
+          item.chunked = false;
           unawaited(_restart(item));
         } else {
           _fail(item, _friendly(update));

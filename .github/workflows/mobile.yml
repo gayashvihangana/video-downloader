@@ -78,7 +78,7 @@ jobs:
       - name: Device tests on the simulator
         timeout-minutes: 20
         run: |
-          python3 -m http.server 8765 --bind 127.0.0.1 --directory integration_test/media &
+          python3 tool/serve_media.py 8765 --bind 127.0.0.1 &
           python tool/build.py ios --skip-package test integration_test             -d "${{ steps.simulator.outputs.udid }}"             --dart-define=TEST_SERVER=http://127.0.0.1:8765             --reporter expanded
 
   android:

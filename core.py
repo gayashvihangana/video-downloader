@@ -1300,7 +1300,9 @@ def mobile_summary(info):
 
 def mobile_media(info):
     """The files to fetch for an already-resolved yt-dlp info dict:
-    [{url, headers, ext, size, kind}] (one file, or video + audio to merge)."""
+    [{url, headers, ext, size, kind, chunk_size}] (one file, or video + audio
+    to merge). chunk_size > 0: fetch in pieces of at most that many bytes, as
+    yt-dlp does; YouTube slows one request for the whole file to a crawl."""
 
     parts = info.get("requested_formats") or [info]
     media = []
@@ -1314,6 +1316,10 @@ def mobile_media(info):
                 "ext": part.get("ext") or "mp4",
                 "size": part.get("filesize") or part.get("filesize_approx") or 0,
                 "kind": "audio" if vcodec == "none" else "video",
+                "chunk_size": (part.get("downloader_options") or {}).get(
+                    "http_chunk_size"
+                )
+                or 0,
             }
         )
 

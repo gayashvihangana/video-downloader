@@ -33,6 +33,7 @@ class DownloadItem {
     this.size = 0,
     this.error = '',
     this.finishedAt,
+    this.chunked = true,
   });
 
   factory DownloadItem.fromJson(Map<String, dynamic> json) => DownloadItem(
@@ -44,8 +45,8 @@ class DownloadItem {
     title: json['title'] as String? ?? '',
     site: json['site'] as String? ?? '',
     thumbnailUrl: json['thumbnailUrl'] as String?,
-    state: DownloadState.values.asNameMap()[json['state']] ??
-        DownloadState.failed,
+    state:
+        DownloadState.values.asNameMap()[json['state']] ?? DownloadState.failed,
     fileName: json['fileName'] as String? ?? '',
     parts: [
       for (final part in json['parts'] as List? ?? const [])
@@ -57,6 +58,7 @@ class DownloadItem {
     finishedAt: json['finishedAt'] == null
         ? null
         : DateTime.fromMillisecondsSinceEpoch(json['finishedAt'] as int),
+    chunked: json['chunked'] as bool? ?? true,
   );
 
   final String id;
@@ -75,6 +77,10 @@ class DownloadItem {
   int size;
   String error;
   DateTime? finishedAt;
+
+  /// Download in pieces where the site wants that; false after that failed
+  /// once, then each file comes in one request
+  bool chunked;
 
   // Live only (not saved)
   double progress = 0;
@@ -143,5 +149,6 @@ class DownloadItem {
     'size': size,
     'error': error,
     'finishedAt': finishedAt?.millisecondsSinceEpoch,
+    'chunked': chunked,
   };
 }
