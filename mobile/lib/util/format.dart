@@ -45,8 +45,18 @@ String when(DateTime? time, {DateTime? now}) {
   if (today.difference(day).inDays == 1) return 'Yesterday';
 
   const months = [
-    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
+    'May',
+    'Jun',
+    'Jul',
+    'Aug',
+    'Sep',
+    'Oct',
+    'Nov',
+    'Dec',
   ];
   return '${time.day} ${months[time.month - 1]}';
 }

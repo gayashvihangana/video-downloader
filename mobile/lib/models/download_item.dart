@@ -109,7 +109,7 @@ class DownloadItem {
         if (timeLeft != null && timeLeft!.inSeconds > 0) {
           details.add('${humanTime(timeLeft!.inSeconds)} left');
         }
-        return details.join('  ·  ');
+        return details.join(' · ');
       case DownloadState.paused:
         return 'Paused at ${(progress * 100).floor()}%';
       case DownloadState.finishing:

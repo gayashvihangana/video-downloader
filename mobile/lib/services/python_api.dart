@@ -62,7 +62,10 @@ class PythonApi {
     final deadline = DateTime.now().add(const Duration(seconds: 90));
     while (DateTime.now().isBefore(deadline)) {
       if (await portFile.exists()) {
-        final api = PythonApi._(int.parse(await portFile.readAsString()), token);
+        final api = PythonApi._(
+          int.parse(await portFile.readAsString()),
+          token,
+        );
         if (await api._answers()) return api;
       }
       await Future<void>.delayed(const Duration(milliseconds: 200));
@@ -72,7 +75,10 @@ class PythonApi {
 
   static String _randomToken() {
     final random = Random.secure();
-    return List.generate(32, (_) => random.nextInt(16).toRadixString(16)).join();
+    return List.generate(
+      32,
+      (_) => random.nextInt(16).toRadixString(16),
+    ).join();
   }
 
   Future<bool> _answers() async {
