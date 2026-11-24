@@ -131,12 +131,12 @@ void main() {
       ),
     );
 
-    expect(find.text('IN PROGRESS'), findsOneWidget);
+    expect(find.text('Downloading'), findsOneWidget);
     expect(find.text('Running now'), findsOneWidget);
     expect(find.byTooltip('Pause'), findsOneWidget);
     expect(find.text('Broken one'), findsOneWidget);
     expect(find.text('This video is private.'), findsOneWidget);
-    expect(find.text('Retry failed'), findsOneWidget);
+    expect(find.text('Retry Failed'), findsOneWidget);
     expect(find.byTooltip('Try again'), findsOneWidget);
   });
 }

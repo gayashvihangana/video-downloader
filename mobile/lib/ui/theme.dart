@@ -1,55 +1,58 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
-/// The app's look: soft neutral surfaces, one warm coral accent (the desktop
-/// app's red, ui/theme.py) used as a gradient for the main actions.
+/// The app's colours: Apple's system greys (they read as native on iPhone
+/// and calm on Android), ink for actions, and colour only where it means
+/// something (red: failed / destructive, green: done).
 class AppPalette extends ThemeExtension<AppPalette> {
   const AppPalette({
     required this.background,
-    required this.card,
-    required this.cardAlt,
-    required this.border,
-    required this.text,
-    required this.muted,
-    required this.success,
+    required this.group,
+    required this.fill,
+    required this.separator,
+    required this.label,
+    required this.onLabel,
+    required this.secondary,
+    required this.tertiary,
+    required this.red,
+    required this.green,
   });
 
-  final Color background; // behind everything
-  final Color card; // raised surfaces
-  final Color cardAlt; // fields and wells inside cards
-  final Color border; // hairlines
-  final Color text;
-  final Color muted; // secondary text and icons
-  final Color success;
-
-  static const accent = Color(0xFFF0465A);
-  static const accentEnd = Color(0xFFFF8A4C);
-
-  /// Coral to warm orange: the Download button, the logo, progress.
-  static const gradient = LinearGradient(
-    colors: [accent, accentEnd],
-    begin: Alignment.topLeft,
-    end: Alignment.bottomRight,
-  );
+  final Color background; // behind the grouped lists
+  final Color group; // the lists / cards themselves
+  final Color fill; // fields, thumbnails, tracks
+  final Color separator; // hairlines
+  final Color label; // text, and the main button ("ink")
+  final Color onLabel; // text on the main button
+  final Color secondary; // supporting text
+  final Color tertiary; // placeholders, chevrons
+  final Color red;
+  final Color green;
 
   static const light = AppPalette(
-    background: Color(0xFFF6F6F9),
-    card: Color(0xFFFFFFFF),
-    cardAlt: Color(0xFFF1F1F6),
-    border: Color(0xFFE7E7EF),
-    text: Color(0xFF14141B),
-    muted: Color(0xFF6E6E7E),
-    success: Color(0xFF1F9D61),
+    background: Color(0xFFF2F2F7),
+    group: Color(0xFFFFFFFF),
+    fill: Color(0xFFE9E9EE),
+    separator: Color(0xFFDCDCE0),
+    label: Color(0xFF111113),
+    onLabel: Color(0xFFFFFFFF),
+    secondary: Color(0xFF86868B),
+    tertiary: Color(0xFFC1C1C6),
+    red: Color(0xFFE5342B),
+    green: Color(0xFF28A745),
   );
 
   static const dark = AppPalette(
-    background: Color(0xFF0C0C10),
-    card: Color(0xFF17171D),
-    cardAlt: Color(0xFF212129),
-    border: Color(0xFF2A2A34),
-    text: Color(0xFFF3F3F7),
-    muted: Color(0xFF9B9BAC),
-    success: Color(0xFF3CCB86),
+    background: Color(0xFF000000),
+    group: Color(0xFF1C1C1E),
+    fill: Color(0xFF2C2C2E),
+    separator: Color(0xFF38383A),
+    label: Color(0xFFF5F5F7),
+    onLabel: Color(0xFF000000),
+    secondary: Color(0xFF8E8E93),
+    tertiary: Color(0xFF545458),
+    red: Color(0xFFFF453A),
+    green: Color(0xFF32D74B),
   );
 
   @override
@@ -61,12 +64,15 @@ class AppPalette extends ThemeExtension<AppPalette> {
     Color mix(Color a, Color b) => Color.lerp(a, b, t)!;
     return AppPalette(
       background: mix(background, other.background),
-      card: mix(card, other.card),
-      cardAlt: mix(cardAlt, other.cardAlt),
-      border: mix(border, other.border),
-      text: mix(text, other.text),
-      muted: mix(muted, other.muted),
-      success: mix(success, other.success),
+      group: mix(group, other.group),
+      fill: mix(fill, other.fill),
+      separator: mix(separator, other.separator),
+      label: mix(label, other.label),
+      onLabel: mix(onLabel, other.onLabel),
+      secondary: mix(secondary, other.secondary),
+      tertiary: mix(tertiary, other.tertiary),
+      red: mix(red, other.red),
+      green: mix(green, other.green),
     );
   }
 }
@@ -81,8 +87,13 @@ extension PaletteOf on BuildContext {
   }
 }
 
-const radius = 22.0; // cards
-const fieldRadius = 16.0; // fields, buttons, chips
+/// One rounding scale for everything.
+const groupRadius = 12.0; // lists, cards, the main button
+const smallRadius = 8.0; // thumbnails, fields
+
+bool get _apple =>
+    defaultTargetPlatform == TargetPlatform.iOS ||
+    defaultTargetPlatform == TargetPlatform.macOS;
 
 ThemeData buildTheme(Brightness brightness) {
   final dark = brightness == Brightness.dark;
@@ -90,53 +101,53 @@ ThemeData buildTheme(Brightness brightness) {
 
   final scheme =
       ColorScheme.fromSeed(
-        seedColor: AppPalette.accent,
+        seedColor: p.label,
         brightness: brightness,
+        dynamicSchemeVariant: DynamicSchemeVariant.monochrome,
       ).copyWith(
-        primary: AppPalette.accent,
-        onPrimary: Colors.white,
+        primary: p.label,
+        onPrimary: p.onLabel,
+        secondary: p.label,
+        error: p.red,
         surface: p.background,
-        onSurface: p.text,
-        onSurfaceVariant: p.muted,
-        surfaceContainerLowest: p.card,
-        surfaceContainerLow: p.card,
-        surfaceContainer: p.card,
-        surfaceContainerHigh: p.cardAlt,
-        surfaceContainerHighest: p.cardAlt,
-        outline: p.border,
-        outlineVariant: p.border,
+        onSurface: p.label,
+        onSurfaceVariant: p.secondary,
+        surfaceContainerLowest: p.group,
+        surfaceContainerLow: p.group,
+        surfaceContainer: p.group,
+        surfaceContainerHigh: p.fill,
+        surfaceContainerHighest: p.fill,
+        outline: p.separator,
+        outlineVariant: p.separator,
       );
 
-  // The phone's own font (Roboto / San Francisco), in our weights
-  final typography = Typography.material2021(platform: defaultTargetPlatform);
+  // The phone's own font (San Francisco / Roboto) at iOS text sizes.
   // (englishLike first: its styles don't inherit, so they'd drop the font)
+  final typography = Typography.material2021(platform: defaultTargetPlatform);
   final base = typography.englishLike.merge(
     dark ? typography.white : typography.black,
   );
+  TextStyle? size(TextStyle? style, double size, FontWeight weight) =>
+      style?.copyWith(
+        fontSize: size,
+        fontWeight: weight,
+        letterSpacing: 0,
+        height: 1.25,
+      );
   final text = base
       .copyWith(
-        displaySmall: base.displaySmall?.copyWith(
-          fontWeight: FontWeight.w800,
-          letterSpacing: -1.2,
-          height: 1.1,
-        ),
-        headlineMedium: base.headlineMedium?.copyWith(
-          fontWeight: FontWeight.w800,
-          letterSpacing: -0.8,
-        ),
-        titleLarge: base.titleLarge?.copyWith(
-          fontWeight: FontWeight.w700,
-          letterSpacing: -0.3,
-        ),
-        titleMedium: base.titleMedium?.copyWith(fontWeight: FontWeight.w700),
-        titleSmall: base.titleSmall?.copyWith(fontWeight: FontWeight.w600),
-        labelLarge: base.labelLarge?.copyWith(fontWeight: FontWeight.w700),
+        headlineLarge: size(base.headlineLarge, 34, FontWeight.w700),
+        titleLarge: size(base.titleLarge, 20, FontWeight.w600),
+        titleMedium: size(base.titleMedium, 17, FontWeight.w600),
+        titleSmall: size(base.titleSmall, 15, FontWeight.w600),
+        bodyLarge: size(base.bodyLarge, 17, FontWeight.w400),
+        bodyMedium: size(base.bodyMedium, 15, FontWeight.w400),
+        bodySmall: size(base.bodySmall, 13, FontWeight.w400),
+        labelLarge: size(base.labelLarge, 17, FontWeight.w600),
+        labelMedium: size(base.labelMedium, 13, FontWeight.w500),
+        labelSmall: size(base.labelSmall, 11, FontWeight.w500),
       )
-      .apply(bodyColor: p.text, displayColor: p.text);
-
-  final rounded = RoundedRectangleBorder(
-    borderRadius: BorderRadius.circular(fieldRadius),
-  );
+      .apply(bodyColor: p.label, displayColor: p.label);
 
   return ThemeData(
     useMaterial3: true,
@@ -145,132 +156,84 @@ ThemeData buildTheme(Brightness brightness) {
     textTheme: text,
     scaffoldBackgroundColor: p.background,
     extensions: [p],
-    splashFactory: InkSparkle.splashFactory,
-    dividerTheme: DividerThemeData(color: p.border, space: 1, thickness: 1),
+    // iPhone apps don't ripple: a quiet highlight instead
+    splashFactory: _apple ? NoSplash.splashFactory : InkRipple.splashFactory,
+    highlightColor: p.fill.withValues(alpha: 0.7),
+    dividerTheme: DividerThemeData(
+      color: p.separator,
+      space: 0.5,
+      thickness: 0.5,
+    ),
     cardTheme: CardThemeData(
-      color: p.card,
+      color: p.group,
       elevation: 0,
       margin: EdgeInsets.zero,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(radius),
-        side: BorderSide(color: p.border),
+        borderRadius: BorderRadius.circular(groupRadius),
       ),
     ),
     inputDecorationTheme: InputDecorationTheme(
-      filled: false,
       border: InputBorder.none,
-      hintStyle: text.bodyLarge?.copyWith(
-        color: p.muted,
-        fontWeight: FontWeight.w500,
-      ),
-    ),
-    filledButtonTheme: FilledButtonThemeData(
-      style: FilledButton.styleFrom(
-        minimumSize: const Size(0, 48),
-        shape: rounded,
-        textStyle: text.labelLarge?.copyWith(fontSize: 15),
-      ),
+      hintStyle: text.bodyLarge?.copyWith(color: p.tertiary),
     ),
     textButtonTheme: TextButtonThemeData(
       style: TextButton.styleFrom(
-        foregroundColor: AppPalette.accent,
-        shape: rounded,
-        textStyle: text.labelLarge,
+        foregroundColor: p.label,
+        textStyle: text.bodyLarge?.copyWith(fontWeight: FontWeight.w600),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(smallRadius),
+        ),
       ),
     ),
     iconButtonTheme: IconButtonThemeData(
-      style: IconButton.styleFrom(foregroundColor: p.muted),
-    ),
-    chipTheme: ChipThemeData(
-      backgroundColor: p.cardAlt,
-      selectedColor: AppPalette.accent.withValues(alpha: dark ? 0.22 : 0.12),
-      side: BorderSide.none,
-      shape: StadiumBorder(side: BorderSide(color: p.border)),
-      labelStyle: text.labelLarge?.copyWith(color: p.text),
-      secondaryLabelStyle: text.labelLarge?.copyWith(color: AppPalette.accent),
-      checkmarkColor: AppPalette.accent,
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 8),
-    ),
-    switchTheme: SwitchThemeData(
-      thumbColor: WidgetStateProperty.resolveWith(
-        (states) =>
-            states.contains(WidgetState.selected) ? Colors.white : p.muted,
-      ),
-      trackColor: WidgetStateProperty.resolveWith(
-        (states) => states.contains(WidgetState.selected)
-            ? AppPalette.accent
-            : p.cardAlt,
-      ),
-      trackOutlineColor: WidgetStateProperty.resolveWith(
-        (states) => states.contains(WidgetState.selected)
-            ? AppPalette.accent
-            : p.border,
-      ),
+      style: IconButton.styleFrom(foregroundColor: p.label),
     ),
     progressIndicatorTheme: ProgressIndicatorThemeData(
-      color: AppPalette.accent,
-      linearTrackColor: p.cardAlt,
-      circularTrackColor: p.cardAlt,
+      color: p.label,
+      linearTrackColor: p.fill,
+      circularTrackColor: Colors.transparent,
+    ),
+    switchTheme: SwitchThemeData(
+      trackColor: WidgetStateProperty.resolveWith(
+        (states) => states.contains(WidgetState.selected) ? p.green : p.fill,
+      ),
+      thumbColor: const WidgetStatePropertyAll(Colors.white),
+      trackOutlineColor: const WidgetStatePropertyAll(Colors.transparent),
     ),
     navigationBarTheme: NavigationBarThemeData(
-      backgroundColor: p.card,
+      backgroundColor: dark ? const Color(0xFF0E0E10) : const Color(0xFFF9F9FB),
       surfaceTintColor: Colors.transparent,
       elevation: 0,
-      height: 72,
-      indicatorColor: AppPalette.accent.withValues(alpha: dark ? 0.2 : 0.12),
-      indicatorShape: const StadiumBorder(),
+      height: 58,
+      indicatorColor: Colors.transparent,
       labelTextStyle: WidgetStateProperty.resolveWith(
-        (states) => text.labelMedium?.copyWith(
-          fontSize: 12,
-          fontWeight: states.contains(WidgetState.selected)
-              ? FontWeight.w700
-              : FontWeight.w500,
-          color: states.contains(WidgetState.selected)
-              ? AppPalette.accent
-              : p.muted,
+        (states) => text.labelSmall?.copyWith(
+          fontSize: 10.5,
+          color: states.contains(WidgetState.selected) ? p.label : p.secondary,
         ),
       ),
       iconTheme: WidgetStateProperty.resolveWith(
         (states) => IconThemeData(
-          color: states.contains(WidgetState.selected)
-              ? AppPalette.accent
-              : p.muted,
+          size: 25,
+          color: states.contains(WidgetState.selected) ? p.label : p.secondary,
         ),
       ),
     ),
-    badgeTheme: const BadgeThemeData(
-      backgroundColor: AppPalette.accent,
-      textColor: Colors.white,
-    ),
+    badgeTheme: BadgeThemeData(backgroundColor: p.red, textColor: Colors.white),
     snackBarTheme: SnackBarThemeData(
       behavior: SnackBarBehavior.floating,
-      backgroundColor: dark ? p.cardAlt : p.text,
+      backgroundColor: dark ? p.fill : p.label,
       contentTextStyle: text.bodyMedium?.copyWith(
-        color: dark ? p.text : p.background,
-        fontWeight: FontWeight.w500,
+        color: dark ? p.label : Colors.white,
       ),
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(fieldRadius),
+        borderRadius: BorderRadius.circular(groupRadius),
       ),
     ),
     dialogTheme: DialogThemeData(
-      backgroundColor: p.card,
+      backgroundColor: p.group,
       surfaceTintColor: Colors.transparent,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
-    ),
-    listTileTheme: ListTileThemeData(
-      iconColor: p.muted,
-      contentPadding: const EdgeInsets.symmetric(horizontal: 16),
-      titleTextStyle: text.titleMedium?.copyWith(
-        color: p.text,
-        fontSize: 16,
-        fontWeight: FontWeight.w600,
-      ),
-      subtitleTextStyle: text.bodyMedium?.copyWith(
-        color: p.muted,
-        fontSize: 13,
-        height: 1.35,
-      ),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
     ),
   );
 }
