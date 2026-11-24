@@ -2,9 +2,12 @@
 // a video stream and a sound stream, they're joined natively into one MP4,
 // and the result is saved to the Gallery.
 //
-// Needs the test files served from the PC:
-//   python -m http.server 8765 --directory <folder with video.mp4, audio.m4a>
+// Needs the test files (integration_test/media: 4 s of H.264 video without
+// sound, and 4 s of AAC sound) served from the computer:
+//   python -m http.server 8765 --directory integration_test/media
 //   python tool/build.py android --skip-package test integration_test/download_test.dart
+// The Android emulator reaches the computer at 10.0.2.2; the iOS simulator
+// at 127.0.0.1 (--dart-define=TEST_SERVER=http://127.0.0.1:8765).
 import 'dart:io';
 
 import 'package:background_downloader/background_downloader.dart';

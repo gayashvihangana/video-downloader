@@ -1,0 +1,119 @@
+# The phone app (mobile/): checks, device tests and builds.
+#   iOS:     builds on macOS (Windows can't), runs the device tests on an
+#            iPhone simulator, and makes an unsigned .ipa to install with
+#            Sideloadly (Actions tab -> this run -> Artifacts).
+#   Android: checks and an .apk (Artifacts).
+name: mobile
+
+on:
+  push:
+    paths: ["mobile/**", "core.py", ".github/workflows/mobile.yml"]
+  pull_request:
+    paths: ["mobile/**", "core.py", ".github/workflows/mobile.yml"]
+  workflow_dispatch:
+
+env:
+  FLUTTER_VERSION: "3.47.0"
+  PYTHON_VERSION: "3.14"
+
+jobs:
+  ios:
+    runs-on: macos-15
+    timeout-minutes: 75
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Checks
+        run: |
+          flutter pub get
+          flutter analyze
+
+      - name: Build for the iPhone simulator (packages Python + yt-dlp)
+        run: python tool/build.py ios build ios --simulator --debug
+
+      - name: Start an iPhone simulator
+        id: simulator
+        run: |
+          UDID=$(xcrun simctl list devices available --json | python3 -c '
+          import json, sys
+          devices = json.load(sys.stdin)["devices"]
+          print(next(d["udid"] for runtime, items in sorted(devices.items(), reverse=True)
+                     if "iOS" in runtime for d in items if d["name"].startswith("iPhone")))')
+          echo "Using simulator $UDID"
+          xcrun simctl boot "$UDID"
+          xcrun simctl bootstatus "$UDID" -b
+          # Saving to Photos asks for permission: answer yes for the tests
+          xcrun simctl privacy "$UDID" grant photos-add io.github.gayashvihangana.videoDownloader || true
+          echo "udid=$UDID" >> "$GITHUB_OUTPUT"
+
+      - name: Device tests on the simulator
+        run: |
+          python3 -m http.server 8765 --bind 127.0.0.1 --directory integration_test/media &
+          python tool/build.py ios --skip-package test integration_test \
+            -d "${{ steps.simulator.outputs.udid }}" \
+            --dart-define=TEST_SERVER=http://127.0.0.1:8765
+
+      - name: Unsigned IPA for Sideloadly
+        run: |
+          python tool/build.py ios build ios --release --no-codesign
+          mkdir -p build/ipa/Payload
+          cp -R build/ios/iphoneos/Runner.app build/ipa/Payload/
+          (cd build/ipa && zip -qry ../VideoDownloader-unsigned.ipa Payload)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios-unsigned-ipa
+          path: mobile/build/VideoDownloader-unsigned.ipa
+          retention-days: 14
+
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Checks
+        run: |
+          flutter pub get
+          flutter analyze
+          flutter test
+
+      - name: Build the APK (packages Python + yt-dlp)
+        run: python tool/build.py android build apk --debug
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: mobile/build/app/outputs/flutter-apk/app-debug.apk
+          retention-days: 14
