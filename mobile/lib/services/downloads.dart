@@ -101,6 +101,7 @@ class Downloads extends ChangeNotifier {
     );
     items.insert(0, item);
     _changed();
+    if (!item.audioOnly) unawaited(canSaveToPhotos()); // ask while it's open
     unawaited(_prepare(item));
     return item;
   }
@@ -145,16 +146,8 @@ class Downloads extends ChangeNotifier {
       _changed();
 
       await makeWorkFolder(item.id);
-      for (var i = 0; i < item.parts.length; i++) {
-        var task = _task(item, i);
-        var started = await FileDownloader().enqueue(task);
-        if (!started && task is ParallelDownloadTask) {
-          // The server won't hand out pieces: fetch the file in one go
-          item.chunked = false;
-          task = _task(item, i);
-          started = await FileDownloader().enqueue(task);
-        }
-        if (!started) {
+      for (final task in _tasks(item)) {
+        if (!await FileDownloader().enqueue(task)) {
           _fail(item, "Couldn't start the download. Try again.");
           return;
         }
@@ -164,17 +157,15 @@ class Downloads extends ChangeNotifier {
     }
   }
 
-  DownloadTask _task(DownloadItem item, int index) => partTask(
-    item.id,
-    index,
-    item.parts[index],
-    wifiOnly: wifiOnly,
-    displayName: item.name,
-    chunked: item.chunked,
-  );
-
   List<DownloadTask> _tasks(DownloadItem item) => [
-    for (var i = 0; i < item.parts.length; i++) _task(item, i),
+    for (var i = 0; i < item.parts.length; i++)
+      partTask(
+        item.id,
+        i,
+        item.parts[i],
+        wifiOnly: wifiOnly,
+        displayName: item.name,
+      ),
   ];
 
   // ---------- progress from the background downloader ----------
@@ -235,17 +226,16 @@ class Downloads extends ChangeNotifier {
           unawaited(_finish(item));
         }
       case TaskStatus.failed || TaskStatus.notFound:
-        // Links from YouTube & co. expire after a few hours (a long pause):
-        // ask yt-dlp for fresh ones once, and start again
+        // Links from YouTube & co. expire after a few hours (a long pause),
+        // and a download in pieces can trip over one piece: ask yt-dlp for
+        // fresh links once, and start again. (Never fall back to one
+        // request for the whole file: YouTube slows that to ~15 KB/s.)
         final code = update.responseStatusCode;
         final expired =
             update.status == TaskStatus.notFound || code == 403 || code == 410;
-        if (expired && !item.retriedExpiredLinks) {
+        final pieces = update.task is ParallelDownloadTask;
+        if ((expired || pieces) && !item.retriedExpiredLinks) {
           item.retriedExpiredLinks = true;
-          unawaited(_restart(item));
-        } else if (update.task is ParallelDownloadTask && item.chunked) {
-          // Downloading in pieces didn't work here: once more in one go
-          item.chunked = false;
           unawaited(_restart(item));
         } else {
           _fail(item, _friendly(update));
