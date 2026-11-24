@@ -15,3 +15,6 @@ key.properties
 
 # Gradle build output and reports
 /build/
+
+# Kotlin compiler cache
+.kotlin/
