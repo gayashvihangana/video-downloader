@@ -18,6 +18,8 @@ class MainActivity : FlutterActivity() {
         super.configureFlutterEngine(flutterEngine)
         // The app's own native piece: video + audio -> one MP4
         flutterEngine.plugins.add(MergePlugin())
+        // JavaScript for YouTube's puzzles, and the YouTube login's cookies
+        flutterEngine.plugins.add(NativePlugin())
 
         // The app was opened by a share
         sharedLink(intent)?.let { pendingLink = it }

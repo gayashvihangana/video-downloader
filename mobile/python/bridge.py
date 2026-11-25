@@ -19,10 +19,22 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import yt_dlp
 
 import core
+import phone_js  # registers the phone's JavaScript engine with yt-dlp
 
 
-def base_options():
-    return {
+def base_options(body=None):
+    """yt-dlp settings for one request. The app sends with each request:
+    "js": {port, token} of its JavaScript engine, and "cookies": the file
+    with the YouTube login (if signed in)."""
+
+    body = body or {}
+    js = body.get("js") or {}
+    phone_js.endpoint = (
+        (int(js["port"]), str(js["token"])) if js.get("port") and js.get("token")
+        else None
+    )
+
+    options = {
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
@@ -31,6 +43,22 @@ def base_options():
         "retries": 3,
         "extractor_retries": 2,
     }
+    cookies = body.get("cookies")
+    if cookies and os.path.isfile(cookies):
+        options["cookiefile"] = cookies
+    return options
+
+
+def friendly_error(error):
+    """core.friendly_error, with the phone's own advice where it differs."""
+
+    lower = str(error).lower()
+    if "not a bot" in lower or "sign in to confirm" in lower:
+        return (
+            "YouTube wants to make sure you're not a robot. Sign in to "
+            "YouTube in Settings, then try again."
+        )
+    return core.friendly_error(error)
 
 
 def extract(url, options):
@@ -55,10 +83,10 @@ def lookup(body):
         return {"error": problems[0] if problems else "Paste a link first."}
 
     try:
-        info = extract(links[0], base_options())
+        info = extract(links[0], base_options(body))
     except Exception as error:
         core.log.warning("Lookup failed for %s: %s", url, error)
-        return {"error": core.friendly_error(error)}
+        return {"error": friendly_error(error)}
 
     summary = core.mobile_summary(info)
     return {**summary, "url": links[0], "error": None}
@@ -69,13 +97,13 @@ def resolve(body):
     mode = body.get("mode") or core.VIDEO
     height = body.get("height")
 
-    options = {**base_options(), "format": core.mobile_format(mode, height)}
+    options = {**base_options(body), "format": core.mobile_format(mode, height)}
 
     try:
         info = first_video(extract(url, options))
     except Exception as error:
         core.log.warning("Resolve failed for %s: %s", url, error)
-        return {"error": core.friendly_error(error)}
+        return {"error": friendly_error(error)}
 
     return {
         "error": None,
@@ -95,6 +123,7 @@ def version(body):
     return {
         "yt_dlp": yt_dlp.version.__version__,
         "python": sys.version.split()[0],
+        "js_runs": phone_js.runs,  # puzzles the phone's JS engine solved
     }
 
 
@@ -127,7 +156,7 @@ def make_server(token, port=0):
                 status = 200
             except Exception as error:
                 core.log.exception("Bridge request %s failed", self.path)
-                result, status = {"error": core.friendly_error(error)}, 500
+                result, status = {"error": friendly_error(error)}, 500
 
             data = json.dumps(result).encode()
             self.send_response(status)

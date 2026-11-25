@@ -16,6 +16,10 @@ class PythonApi {
 
   final int _port;
   final String _token;
+
+  /// Added to every request: the JavaScript engine's address and the
+  /// YouTube login file (set by main.dart).
+  static Future<Map<String, Object?>> Function()? extras;
   final HttpClient _http = HttpClient()
     ..connectionTimeout = const Duration(seconds: 5);
 
@@ -102,7 +106,7 @@ class PythonApi {
     // Python's simple server reads exactly Content-Length bytes and closes
     // the connection after each answer, so send the length (not chunked)
     // and don't keep the connection open
-    final data = utf8.encode(jsonEncode(body));
+    final data = utf8.encode(jsonEncode({...?(await extras?.call()), ...body}));
     request
       ..persistentConnection = false
       ..contentLength = data.length;

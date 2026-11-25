@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:video_downloader/models/download_item.dart';
 import 'package:video_downloader/screens/downloads.dart';
+import 'package:video_downloader/services/account.dart';
 import 'package:video_downloader/services/downloads.dart';
 import 'package:video_downloader/services/media.dart';
 import 'package:video_downloader/util/format.dart';
@@ -138,5 +139,48 @@ void main() {
     expect(find.text('This video is private.'), findsOneWidget);
     expect(find.text('Retry Failed'), findsOneWidget);
     expect(find.byTooltip('Try again'), findsOneWidget);
+  });
+
+  test('the YouTube login is saved the way yt-dlp reads it', () {
+    final text = Account.toNetscape([
+      {
+        'name': 'SAPISID',
+        'value': 'abc/def',
+        'domain': '.youtube.com',
+        'path': '/',
+        'secure': true,
+        'expires': 1900000000,
+      },
+      // Android gives no expiry: half a year from now
+      {'name': 'PREF', 'value': 'f6=40000000', 'domain': 'youtube.com'},
+    ], now: DateTime.utc(2026, 1, 1));
+    final lines = text.trim().split(String.fromCharCode(10));
+    String row(List<Object> cells) => cells.join(String.fromCharCode(9));
+    expect(lines.first, '# Netscape HTTP Cookie File');
+    expect(
+      lines[1],
+      row([
+        '.youtube.com',
+        'TRUE',
+        '/',
+        'TRUE',
+        1900000000,
+        'SAPISID',
+        'abc/def',
+      ]),
+    );
+    final halfYear = DateTime.utc(2026, 6, 30).millisecondsSinceEpoch ~/ 1000;
+    expect(
+      lines[2],
+      row([
+        '.youtube.com',
+        'TRUE',
+        '/',
+        'TRUE',
+        halfYear,
+        'PREF',
+        'f6=40000000',
+      ]),
+    );
   });
 }
