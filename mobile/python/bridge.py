@@ -16,10 +16,10 @@ import os
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import phone_js  # registers the phone's JavaScript engine with yt-dlp
 import yt_dlp
 
 import core
-import phone_js  # registers the phone's JavaScript engine with yt-dlp
 
 
 def base_options(body=None):
@@ -30,7 +30,8 @@ def base_options(body=None):
     body = body or {}
     js = body.get("js") or {}
     phone_js.endpoint = (
-        (int(js["port"]), str(js["token"])) if js.get("port") and js.get("token")
+        (int(js["port"]), str(js["token"]))
+        if js.get("port") and js.get("token")
         else None
     )
 
