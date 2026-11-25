@@ -1,9 +1,8 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
-/// The app's colours: Apple's system greys (they read as native on iPhone
-/// and calm on Android), ink for actions, and colour only where it means
-/// something (red: failed / destructive, green: done).
+/// The app's colours: deep neutral greys so the videos' own pictures carry
+/// the colour, and one solid brand red (the desktop app's) for actions.
 class AppPalette extends ThemeExtension<AppPalette> {
   const AppPalette({
     required this.background,
@@ -16,6 +15,7 @@ class AppPalette extends ThemeExtension<AppPalette> {
     required this.tertiary,
     required this.red,
     required this.green,
+    this.accent = const Color(0xFFE5484D),
   });
 
   final Color background; // behind the grouped lists
@@ -28,29 +28,30 @@ class AppPalette extends ThemeExtension<AppPalette> {
   final Color tertiary; // placeholders, chevrons
   final Color red;
   final Color green;
+  final Color accent; // the main button, selection, progress
 
   static const light = AppPalette(
-    background: Color(0xFFF2F2F7),
+    background: Color(0xFFF4F4F6),
     group: Color(0xFFFFFFFF),
-    fill: Color(0xFFE9E9EE),
-    separator: Color(0xFFDCDCE0),
-    label: Color(0xFF111113),
+    fill: Color(0xFFEAEAEE),
+    separator: Color(0xFFE0E0E5),
+    label: Color(0xFF0F0F12),
     onLabel: Color(0xFFFFFFFF),
-    secondary: Color(0xFF86868B),
-    tertiary: Color(0xFFC1C1C6),
+    secondary: Color(0xFF6E6E76),
+    tertiary: Color(0xFFB9B9C0),
     red: Color(0xFFE5342B),
     green: Color(0xFF28A745),
   );
 
   static const dark = AppPalette(
-    background: Color(0xFF000000),
-    group: Color(0xFF1C1C1E),
-    fill: Color(0xFF2C2C2E),
-    separator: Color(0xFF38383A),
-    label: Color(0xFFF5F5F7),
+    background: Color(0xFF0B0B0D),
+    group: Color(0xFF18181B),
+    fill: Color(0xFF26262B),
+    separator: Color(0xFF2E2E34),
+    label: Color(0xFFF4F4F6),
     onLabel: Color(0xFF000000),
-    secondary: Color(0xFF8E8E93),
-    tertiary: Color(0xFF545458),
+    secondary: Color(0xFF9C9CA4),
+    tertiary: Color(0xFF5A5A62),
     red: Color(0xFFFF453A),
     green: Color(0xFF32D74B),
   );
@@ -73,6 +74,7 @@ class AppPalette extends ThemeExtension<AppPalette> {
       tertiary: mix(tertiary, other.tertiary),
       red: mix(red, other.red),
       green: mix(green, other.green),
+      accent: mix(accent, other.accent),
     );
   }
 }
@@ -189,13 +191,13 @@ ThemeData buildTheme(Brightness brightness) {
       style: IconButton.styleFrom(foregroundColor: p.label),
     ),
     progressIndicatorTheme: ProgressIndicatorThemeData(
-      color: p.label,
+      color: p.accent,
       linearTrackColor: p.fill,
       circularTrackColor: Colors.transparent,
     ),
     switchTheme: SwitchThemeData(
       trackColor: WidgetStateProperty.resolveWith(
-        (states) => states.contains(WidgetState.selected) ? p.green : p.fill,
+        (states) => states.contains(WidgetState.selected) ? p.accent : p.fill,
       ),
       thumbColor: const WidgetStatePropertyAll(Colors.white),
       trackOutlineColor: const WidgetStatePropertyAll(Colors.transparent),
@@ -209,13 +211,13 @@ ThemeData buildTheme(Brightness brightness) {
       labelTextStyle: WidgetStateProperty.resolveWith(
         (states) => text.labelSmall?.copyWith(
           fontSize: 10.5,
-          color: states.contains(WidgetState.selected) ? p.label : p.secondary,
+          color: states.contains(WidgetState.selected) ? p.accent : p.secondary,
         ),
       ),
       iconTheme: WidgetStateProperty.resolveWith(
         (states) => IconThemeData(
           size: 25,
-          color: states.contains(WidgetState.selected) ? p.label : p.secondary,
+          color: states.contains(WidgetState.selected) ? p.accent : p.secondary,
         ),
       ),
     ),

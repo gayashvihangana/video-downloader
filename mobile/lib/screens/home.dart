@@ -1,10 +1,10 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../models/download_item.dart';
 import '../services/downloads.dart';
 import '../services/python_api.dart';
 import '../services/settings.dart';
@@ -223,33 +223,48 @@ class HomeScreenState extends State<HomeScreen> {
         ? 'Works with YouTube, TikTok, Instagram and Facebook. You can also '
               'share a link to this app.'
         : 'Works with YouTube, TikTok, Instagram and Facebook.';
-    return SafeArea(
-      bottom: false,
-      child: ListView(
-        padding: const EdgeInsets.only(bottom: 32),
-        keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
-        children: [
-          const LargeTitle('New Download'),
-          Section(
-            footer: _look == _Look.empty ? hint : null,
+    final backdrop = _look == _Look.ready
+        ? (_info?['thumbnail_url'] as String?)
+        : null;
+
+    return Stack(
+      children: [
+        // The video's own colours behind everything once it's looked up
+        AnimatedSwitcher(
+          duration: const Duration(milliseconds: 400),
+          child: backdrop == null
+              ? const SizedBox.shrink()
+              : Backdrop(key: ValueKey(backdrop), url: backdrop),
+        ),
+        SafeArea(
+          bottom: false,
+          child: ListView(
+            padding: const EdgeInsets.only(bottom: 32),
+            keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
             children: [
-              _LinkField(
-                controller: _link,
-                onChanged: _onChanged,
-                onPaste: _paste,
-                onClear: _clear,
+              const LargeTitle('New Download'),
+              Section(
+                footer: _look == _Look.empty ? hint : null,
+                children: [
+                  _LinkField(
+                    controller: _link,
+                    onChanged: _onChanged,
+                    onPaste: _paste,
+                    onClear: _clear,
+                  ),
+                ],
+              ),
+              AnimatedSwitcher(
+                duration: const Duration(milliseconds: 220),
+                child: KeyedSubtree(
+                  key: ValueKey('$_look${_info?['url']}${_started != null}'),
+                  child: _body(),
+                ),
               ),
             ],
           ),
-          AnimatedSwitcher(
-            duration: const Duration(milliseconds: 200),
-            child: KeyedSubtree(
-              key: ValueKey('$_look${_info?['url']}${_started != null}'),
-              child: _body(),
-            ),
-          ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 
@@ -262,16 +277,22 @@ class HomeScreenState extends State<HomeScreen> {
       case _Look.ready:
         return _preview();
       case _Look.empty:
-        if (_started == null) return const SizedBox.shrink();
-        return Section(
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            GroupRow(
-              title: 'Download started',
-              subtitle: _started,
-              value: 'View',
-              chevron: true,
-              onTap: widget.onGoToDownloads,
-            ),
+            if (_started != null)
+              Section(
+                children: [
+                  GroupRow(
+                    title: 'Download started',
+                    subtitle: _started,
+                    value: 'View',
+                    chevron: true,
+                    onTap: widget.onGoToDownloads,
+                  ),
+                ],
+              ),
+            _RecentlySaved(downloads: widget.downloads),
           ],
         );
     }
@@ -294,109 +315,157 @@ class HomeScreenState extends State<HomeScreen> {
     final selected = video ? _qualities[_quality] : null;
     final size = selected == null ? '' : _sizeText(selected);
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Section(
-          children: [
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                AspectRatio(
-                  aspectRatio: 16 / 9,
-                  child: MediaThumb(
-                    url: info['thumbnail_url'] as String?,
-                    audio: !_hasVideo,
-                    radius: 0,
-                    iconSize: 40,
-                  ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 14),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        title,
-                        maxLines: 3,
-                        overflow: TextOverflow.ellipsis,
-                        style: text.titleMedium,
-                      ),
-                      if (details.isNotEmpty) ...[
-                        const SizedBox(height: 3),
-                        Text(
-                          details,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: text.bodyMedium?.copyWith(color: p.secondary),
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
-              ],
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 4, 20, 0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          AspectRatio(
+            aspectRatio: 16 / 9,
+            child: Artwork(
+              url: info['thumbnail_url'] as String?,
+              audio: !_hasVideo,
+            ),
+          ),
+          const SizedBox(height: 18),
+          Text(
+            title,
+            maxLines: 3,
+            overflow: TextOverflow.ellipsis,
+            style: text.titleLarge?.copyWith(
+              fontSize: 22,
+              fontWeight: FontWeight.w700,
+              height: 1.2,
+            ),
+          ),
+          if (details.isNotEmpty) ...[
+            const SizedBox(height: 6),
+            Text(
+              details,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: text.bodyMedium?.copyWith(color: p.secondary),
             ),
           ],
-        ),
-        if (_hasVideo && _hasAudio)
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 28),
-            child: CupertinoSlidingSegmentedControl<String>(
-              groupValue: _mode,
-              backgroundColor: p.fill,
-              thumbColor: Theme.of(context).brightness == Brightness.dark
-                  ? const Color(0xFF636366)
-                  : Colors.white,
-              padding: const EdgeInsets.all(2),
-              onValueChanged: (value) {
-                if (value != null) setState(() => _mode = value);
-              },
-              children: {
-                for (final mode in ['Video', 'Audio'])
-                  mode: Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 7),
-                    child: Text(
-                      mode == 'Video' ? 'Video' : 'Audio only',
-                      style: text.bodyMedium?.copyWith(
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ),
-              },
+          const SizedBox(height: 22),
+          if (_hasVideo && _hasAudio) ...[
+            PillToggle<String>(
+              value: _mode,
+              options: const {'Video': 'Video', 'Audio': 'Audio only'},
+              onChanged: (value) => setState(() => _mode = value),
             ),
-          ),
-        if (video)
-          Section(
-            header: 'Quality',
-            children: [
-              for (var i = 0; i < _qualities.length; i++)
-                GroupRow(
-                  title: _qualities[i]['label'] as String,
-                  value: _sizeText(_qualities[i]),
-                  trailing: SizedBox(
-                    width: 22,
-                    child: i == _quality
-                        ? Icon(Icons.check_rounded, color: p.label, size: 22)
-                        : null,
-                  ),
-                  onTap: () => setState(() => _quality = i),
-                ),
-            ],
-          )
-        else
-          const Section(
-            header: 'Sound',
-            footer: 'Plays on every phone and in music apps.',
-            children: [GroupRow(title: 'M4A', value: 'Best quality')],
-          ),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16),
-          child: PrimaryButton(
+            const SizedBox(height: 18),
+          ],
+          if (video) ...[
+            Text(
+              'Quality',
+              style: text.bodySmall?.copyWith(color: p.secondary),
+            ),
+            const SizedBox(height: 8),
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              clipBehavior: Clip.none,
+              child: Row(
+                children: [
+                  for (var i = 0; i < _qualities.length; i++) ...[
+                    if (i > 0) const SizedBox(width: 8),
+                    QualityPill(
+                      label: _qualities[i]['label'] as String,
+                      size: _sizeText(_qualities[i]),
+                      selected: i == _quality,
+                      onTap: () => setState(() => _quality = i),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ] else
+            Text(
+              'Best quality sound, saved as M4A. Plays on every phone.',
+              style: text.bodyMedium?.copyWith(color: p.secondary),
+            ),
+          const SizedBox(height: 26),
+          PrimaryButton(
             label: size.isEmpty ? 'Download' : 'Download · $size',
+            icon: Icons.arrow_downward_rounded,
             onPressed: _download,
           ),
-        ),
-      ],
+        ],
+      ),
+    );
+  }
+}
+
+/// The last videos you saved, as artwork you can tap to open.
+class _RecentlySaved extends StatelessWidget {
+  const _RecentlySaved({required this.downloads});
+
+  final Downloads downloads;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.palette;
+    final text = Theme.of(context).textTheme;
+    return ListenableBuilder(
+      listenable: downloads,
+      builder: (context, _) {
+        final saved = downloads.recent
+            .where((item) => item.state == DownloadState.done)
+            .take(8)
+            .toList();
+        if (saved.isEmpty) return const SizedBox.shrink();
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
+              child: Text('Recently Saved', style: text.titleLarge),
+            ),
+            SizedBox(
+              height: 160,
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
+                padding: const EdgeInsets.symmetric(horizontal: 20),
+                itemCount: saved.length,
+                separatorBuilder: (_, _) => const SizedBox(width: 12),
+                itemBuilder: (context, i) {
+                  final item = saved[i];
+                  return GestureDetector(
+                    onTap: () => downloads.open(item),
+                    child: SizedBox(
+                      width: 176,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          SizedBox(
+                            height: 99,
+                            width: 176,
+                            child: MediaThumb(
+                              url: item.thumbnailUrl,
+                              audio: item.audioOnly,
+                              radius: 12,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            item.name,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: text.bodyMedium?.copyWith(
+                              fontWeight: FontWeight.w600,
+                              color: p.label,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
+        );
+      },
     );
   }
 }
@@ -455,30 +524,28 @@ class _LoadingPreview extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return const Section(
-      footer: 'Looking up the link…',
-      children: [
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            AspectRatio(
-              aspectRatio: 16 / 9,
-              child: Pulse(height: double.infinity, radius: 0),
-            ),
-            Padding(
-              padding: EdgeInsets.fromLTRB(16, 14, 16, 16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Pulse(height: 14),
-                  SizedBox(height: 8),
-                  Pulse(width: 160, height: 14),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ],
+    final p = context.palette;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 4, 20, 0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const AspectRatio(
+            aspectRatio: 16 / 9,
+            child: Pulse(height: double.infinity, radius: 16),
+          ),
+          const SizedBox(height: 18),
+          const Pulse(height: 18),
+          const SizedBox(height: 8),
+          const Pulse(width: 180, height: 18),
+          const SizedBox(height: 14),
+          Text(
+            'Looking up the link…',
+            style: Theme.of(context).textTheme.bodyMedium
+                ?.copyWith(color: p.secondary),
+          ),
+        ],
+      ),
     );
   }
 }
