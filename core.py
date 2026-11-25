@@ -37,7 +37,7 @@ from yt_dlp.postprocessor.common import PostProcessor
 
 SETTINGS_FILE = os.path.join(os.path.expanduser("~"), ".video_downloader.json")
 
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.1.1"
 
 # Updates come from the latest release of this GitHub repo. The release must
 # have a "VideoDownloader-Setup-<version>.exe" file attached (build.ps1 makes it).
@@ -435,6 +435,85 @@ def needs_sign_in(error):
 
     lower = str(error).lower()
     return any(word in lower for word in SIGN_IN_WORDS)
+
+
+# yt-dlp options that make it use an account
+SIGN_IN_OPTIONS = ("cookiefile", "cookiesfrombrowser")
+
+
+def without_sign_in(options):
+    """The same yt-dlp options, minus the account."""
+
+    return {key: value for key, value in options.items() if key not in SIGN_IN_OPTIONS}
+
+
+def extract_info(options, url, download=False, setup=None):
+    """yt-dlp's extract_info, with one safety net: when a signed-in attempt
+    fails for a reason an account can't fix, try once more without it.
+
+    A browser login makes YouTube answer differently, and sometimes that answer
+    has no downloadable video ("Requested format is not available"). Without
+    this, one bad login breaks every link, public ones too. setup(downloader)
+    runs before each attempt (e.g. to add post-processors).
+    """
+
+    import yt_dlp
+    from yt_dlp.utils import DownloadCancelled
+
+    def attempt(attempt_options):
+        with yt_dlp.YoutubeDL(attempt_options) as downloader:
+            if setup:
+                setup(downloader)
+            return downloader.extract_info(url, download=download)
+
+    try:
+        return attempt(options)
+    except DownloadCancelled:
+        raise
+    except Exception as error:
+        signed_in = any(key in options for key in SIGN_IN_OPTIONS)
+        if not signed_in or needs_sign_in(error):
+            raise
+
+        log.warning(
+            "Signed-in attempt failed for %s (%s); trying without the account",
+            url,
+            error,
+        )
+        try:
+            return attempt(without_sign_in(options))
+        except DownloadCancelled:
+            raise
+        except Exception:
+            raise error from None  # the first error says more
+
+
+def download_cache_paths():
+    """yt-dlp's cache folder and gallery-dl's cache file (may not exist)."""
+
+    cache_home = os.environ.get("XDG_CACHE_HOME") or os.path.join(
+        os.path.expanduser("~"), ".cache"
+    )
+    paths = [os.path.join(cache_home, "yt-dlp")]
+
+    if os.environ.get("APPDATA"):
+        # Only the cache: the folder may also hold the user's gallery-dl config
+        paths.append(os.path.join(os.environ["APPDATA"], "gallery-dl", "cache.sqlite3"))
+
+    return paths
+
+
+def clear_download_caches():
+    """Delete yt-dlp's and gallery-dl's caches. They are rebuilt as needed."""
+
+    for path in download_cache_paths():
+        try:
+            if os.path.isdir(path):
+                shutil.rmtree(path)
+            elif os.path.isfile(path):
+                os.remove(path)
+        except OSError as error:
+            log.warning("Couldn't clear cache %s: %s", path, error)
 
 
 def site_of(url):
