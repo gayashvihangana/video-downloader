@@ -1,6 +1,8 @@
 import AVFoundation
 import Flutter
+import JavaScriptCore
 import UIKit
+import WebKit
 
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
@@ -16,6 +18,10 @@ import UIKit
     // The app's own native piece: video + audio -> one MP4
     if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "MergePlugin") {
       MergePlugin.register(with: registrar)
+    }
+    // JavaScript for YouTube's puzzles, and the YouTube login's cookies
+    if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "NativePlugin") {
+      NativePlugin.register(with: registrar)
     }
   }
 }
@@ -115,5 +121,73 @@ class MergePlugin: NSObject, FlutterPlugin {
       throw MergeError.exportFailed("this video can't be copied as-is")
     }
     try await export.export(to: output, as: .mp4)
+  }
+}
+
+/// "video_downloader/native":
+/// - evalJs {code}: runs JavaScript on the phone's own engine (JavaScriptCore)
+///   and returns the last value as text (services/js_engine.dart)
+/// - youtubeCookies: the sign-in page's YouTube / Google cookies, including
+///   the HttpOnly ones only the app can read (services/account.dart)
+class NativePlugin: NSObject, FlutterPlugin {
+  static func register(with registrar: FlutterPluginRegistrar) {
+    let channel = FlutterMethodChannel(
+      name: "video_downloader/native", binaryMessenger: registrar.messenger())
+    registrar.addMethodCallDelegate(NativePlugin(), channel: channel)
+  }
+
+  private let jsQueue = DispatchQueue(label: "video_downloader.js", qos: .userInitiated)
+
+  func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+    switch call.method {
+    case "evalJs":
+      guard let code = (call.arguments as? [String: Any])?["code"] as? String else {
+        result(FlutterError(code: "bad_args", message: "No code", details: nil))
+        return
+      }
+      jsQueue.async {
+        // A fresh engine each time: nothing is kept between puzzles
+        guard let context = JSContext() else {
+          DispatchQueue.main.async {
+            result(FlutterError(code: "js_failed", message: "No JavaScript engine", details: nil))
+          }
+          return
+        }
+        var failure: String?
+        context.exceptionHandler = { _, exception in
+          if failure == nil { failure = exception?.toString() }
+        }
+        let value = context.evaluateScript(code)
+        let output = value?.isString == true ? value?.toString() : nil
+        DispatchQueue.main.async {
+          if let output = output {
+            result(output)
+          } else {
+            result(FlutterError(
+              code: "js_failed", message: failure ?? "The script gave no output", details: nil))
+          }
+        }
+      }
+
+    case "youtubeCookies":
+      WKWebsiteDataStore.default().httpCookieStore.getAllCookies { cookies in
+        let wanted = cookies.filter {
+          $0.domain.hasSuffix("youtube.com") || $0.domain.hasSuffix("google.com")
+        }
+        result(wanted.map { cookie in
+          [
+            "name": cookie.name,
+            "value": cookie.value,
+            "domain": cookie.domain,
+            "path": cookie.path,
+            "secure": cookie.isSecure,
+            "expires": cookie.expiresDate.map { Int($0.timeIntervalSince1970) } ?? 0,
+          ] as [String: Any]
+        })
+      }
+
+    default:
+      result(FlutterMethodNotImplemented)
+    }
   }
 }

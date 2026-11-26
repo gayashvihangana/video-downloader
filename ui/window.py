@@ -14,7 +14,6 @@ import subprocess
 import threading
 import time
 
-import yt_dlp
 from PySide6.QtCore import QObject, QSignalBlocker, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
@@ -751,6 +750,17 @@ class VideoDownloader(FluentWindow):
         )
         log_card.clicked.connect(self.open_log)
         errors.addSettingCard(log_card)
+
+        reset_card = PushSettingCard(
+            "Reset",
+            FluentIcon.BROOM,
+            "Reset app",
+            "If links stopped opening: signs out, clears saved data and puts "
+            "settings back to normal. Your downloads and folder are kept.",
+            errors,
+        )
+        reset_card.clicked.connect(self.ask_to_reset)
+        errors.addSettingCard(reset_card)
         layout.addWidget(errors)
 
         # --- Personalization ---
@@ -1090,8 +1100,7 @@ class VideoDownloader(FluentWindow):
 
         # 1. Video / audio via yt-dlp
         try:
-            with yt_dlp.YoutubeDL(ydl_options) as downloader:
-                info = downloader.extract_info(url, download=False)
+            info = core.extract_info(ydl_options, url)
 
             result.update(core.summarize_video(info, not self.has_ffmpeg))
 
@@ -1500,6 +1509,50 @@ class VideoDownloader(FluentWindow):
         self.save_settings()
         self.update_sign_in_chip()
         self.toast("info", "Signed out", "Links are opened without an account now.")
+
+    def ask_to_reset(self):
+
+        box = MessageBox(
+            "Reset the app?",
+            "This signs you out, clears saved data (like YouTube's player "
+            "files) and puts settings back to normal. Your downloaded files, "
+            "download folder and download list are kept.",
+            self,
+        )
+        box.yesButton.setText("Reset")
+        box.cancelButton.setText("Cancel")
+
+        if box.exec():
+            self.reset_app()
+
+    def reset_app(self):
+        """Back to a fresh install's state, except downloads and their folder."""
+
+        core.clear_download_caches()
+        self.photo_cache.clear()
+
+        self.sign_in_method = NO_SIGN_IN
+        self.cookie_file = None
+        self.update_sign_in_chip()
+        self.hide_sign_in_panel()
+
+        for menu, value in (
+            (self.retry_menu, DEFAULT_RETRY),
+            (self.on_error_menu, SKIP_FAILED),
+            (self.video_format_menu, PLAYS_EVERYWHERE),
+        ):
+            with QSignalBlocker(menu):
+                menu.set(value)
+
+        self.set_theme("system")  # also saves the settings
+        self.update_quality_menu()
+        log.info("App reset")
+
+        # Open the current link again, this time from a clean state
+        if self.get_urls():
+            self.start_lookup(force=True)
+
+        self.toast("success", "App reset", "Signed out and saved data cleared.")
 
     def update_sign_in_chip(self):
 
@@ -2047,7 +2100,7 @@ class VideoDownloader(FluentWindow):
         make_playable = options.pop("make_playable", False)
         options["progress_hooks"] = [lambda data: self.progress_hook(task, data)]
 
-        with yt_dlp.YoutubeDL(options) as downloader:
+        def setup(downloader):
             # Clean social-media titles before the file is named
             downloader.add_post_processor(CleanTitle(), when="pre_process")
 
@@ -2059,7 +2112,7 @@ class VideoDownloader(FluentWindow):
                     )
                 )
 
-            info = downloader.extract_info(task.url, download=True) or {}
+        info = core.extract_info(options, task.url, download=True, setup=setup) or {}
 
         # Where the finished file is (after merging / converting to MP3)
         downloads = info.get("requested_downloads") or [info]

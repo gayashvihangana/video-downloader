@@ -1,3 +1,5 @@
+import 'dart:ui' show ImageFilter;
+
 import 'package:flutter/material.dart';
 
 import 'theme.dart';
@@ -193,35 +195,235 @@ class GroupRow extends StatelessWidget {
   }
 }
 
-/// The one main action on a screen: solid ink, full width.
+/// The one main action on a screen: solid brand red, full width.
 class PrimaryButton extends StatelessWidget {
   const PrimaryButton({
     super.key,
     required this.label,
     required this.onPressed,
+    this.icon,
   });
 
   final String label;
+  final IconData? icon;
   final VoidCallback? onPressed;
 
   @override
   Widget build(BuildContext context) {
     final p = context.palette;
     return SizedBox(
-      height: 50,
-      child: FilledButton(
+      height: 54,
+      child: FilledButton.icon(
         onPressed: onPressed,
+        icon: icon == null ? null : Icon(icon, size: 20),
+        label: Text(label),
         style: FilledButton.styleFrom(
-          backgroundColor: p.label,
-          foregroundColor: p.onLabel,
+          backgroundColor: p.accent,
+          foregroundColor: Colors.white,
           disabledBackgroundColor: p.fill,
           elevation: 0,
           textStyle: Theme.of(context).textTheme.labelLarge,
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(groupRadius),
+            borderRadius: BorderRadius.circular(14),
           ),
         ),
-        child: Text(label),
+      ),
+    );
+  }
+}
+
+/// A video's picture, large and rounded, lifted off the page.
+class Artwork extends StatelessWidget {
+  const Artwork({
+    super.key,
+    required this.url,
+    required this.audio,
+    this.radius = 16,
+    this.iconSize = 40,
+  });
+
+  final String? url;
+  final bool audio;
+  final double radius;
+  final double iconSize;
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(radius),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x59000000),
+            blurRadius: 30,
+            offset: Offset(0, 14),
+          ),
+        ],
+      ),
+      child: MediaThumb(
+        url: url,
+        audio: audio,
+        radius: radius,
+        iconSize: iconSize,
+      ),
+    );
+  }
+}
+
+/// The video's own picture, blurred, filling the top of the screen and
+/// fading into the background (as Apple Music / TV do).
+class Backdrop extends StatelessWidget {
+  const Backdrop({super.key, required this.url, this.height = 460});
+
+  final String? url;
+  final double height;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.palette;
+    return SizedBox(
+      height: height,
+      width: double.infinity,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          if (url != null)
+            ImageFiltered(
+              imageFilter: ImageFilter.blur(sigmaX: 50, sigmaY: 50),
+              child: Image.network(
+                url!,
+                fit: BoxFit.cover,
+                errorBuilder: (_, _, _) => const SizedBox.shrink(),
+              ),
+            ),
+          DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [
+                  p.background.withValues(alpha: 0.35),
+                  p.background.withValues(alpha: 0.75),
+                  p.background,
+                ],
+                stops: const [0, 0.6, 1],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Two or more choices in a pill track, one picked (Video / Audio).
+class PillToggle<T> extends StatelessWidget {
+  const PillToggle({
+    super.key,
+    required this.value,
+    required this.options,
+    required this.onChanged,
+  });
+
+  final T value;
+  final Map<T, String> options;
+  final ValueChanged<T> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.palette;
+    final text = Theme.of(context).textTheme;
+    return Container(
+      height: 44,
+      padding: const EdgeInsets.all(4),
+      decoration: BoxDecoration(
+        color: p.fill,
+        borderRadius: BorderRadius.circular(22),
+      ),
+      child: Row(
+        children: [
+          for (final entry in options.entries)
+            Expanded(
+              child: Semantics(
+                button: true,
+                selected: entry.key == value,
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () => onChanged(entry.key),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 180),
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: entry.key == value ? p.label : Colors.transparent,
+                      borderRadius: BorderRadius.circular(18),
+                    ),
+                    child: Text(
+                      entry.value,
+                      style: text.bodyMedium?.copyWith(
+                        fontWeight: FontWeight.w600,
+                        color: entry.key == value ? p.onLabel : p.secondary,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// One quality to pick: "1080p" over "182 MB".
+class QualityPill extends StatelessWidget {
+  const QualityPill({
+    super.key,
+    required this.label,
+    required this.size,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String label;
+  final String size;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.palette;
+    final text = Theme.of(context).textTheme;
+    return Semantics(
+      button: true,
+      selected: selected,
+      child: GestureDetector(
+        onTap: onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          width: 92,
+          padding: const EdgeInsets.symmetric(vertical: 10),
+          decoration: BoxDecoration(
+            color: selected ? p.accent : p.fill,
+            borderRadius: BorderRadius.circular(14),
+          ),
+          child: Column(
+            children: [
+              Text(
+                label,
+                style: text.titleMedium?.copyWith(
+                  color: selected ? Colors.white : p.label,
+                ),
+              ),
+              if (size.isNotEmpty)
+                Text(
+                  size,
+                  style: text.bodySmall?.copyWith(
+                    color: selected ? Colors.white70 : p.secondary,
+                  ),
+                ),
+            ],
+          ),
+        ),
       ),
     );
   }

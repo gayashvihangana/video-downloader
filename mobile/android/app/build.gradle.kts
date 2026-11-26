@@ -19,7 +19,8 @@ android {
         applicationId = "io.github.gayashvihangana.video_downloader"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = flutter.minSdkVersion
+        // 26: Android's JavaScript engine (JavaScriptSandbox) needs Android 8
+        minSdk = maxOf(flutter.minSdkVersion, 26)
         targetSdk = flutter.targetSdkVersion
         // Uses the version code from pubspec.yaml. When using split APKs, 1000 * ABI_VERSION
         // is added automatically by Flutter. (https://developer.android.com/studio/build/configure-apk-splits#configure-APK-versions)
@@ -46,4 +47,9 @@ kotlin {
 
 flutter {
     source = "../.."
+}
+
+dependencies {
+    // YouTube's JavaScript puzzles run on the phone's own engine (NativePlugin.kt)
+    implementation("androidx.javascriptengine:javascriptengine:1.0.0")
 }

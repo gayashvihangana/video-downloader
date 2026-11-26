@@ -159,17 +159,17 @@ class DownloadTile extends StatelessWidget {
     return InkWell(
       onTap: item.state == DownloadState.done ? () => _open(context) : null,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 10, 6, 10),
+        padding: const EdgeInsets.fromLTRB(12, 12, 6, 12),
         child: Row(
           children: [
             SizedBox(
-              width: 80,
-              height: 45,
+              width: 104,
+              height: 58,
               child: MediaThumb(
                 url: item.thumbnailUrl,
                 audio: item.audioOnly,
-                radius: 6,
-                iconSize: 18,
+                radius: 10,
+                iconSize: 20,
               ),
             ),
             const SizedBox(width: 12),
@@ -205,7 +205,7 @@ class DownloadTile extends StatelessWidget {
                             : null, // still getting ready / joining
                         color: item.state == DownloadState.paused
                             ? p.secondary
-                            : p.label,
+                            : p.accent,
                       ),
                     ),
                   ],

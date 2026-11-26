@@ -232,3 +232,49 @@ def test_wrong_token_is_refused(api):
 def test_version(api):
     result = call(api, "/version")
     assert result["yt_dlp"] == yt_dlp.version.__version__
+
+
+# ---------- YouTube's checks: the phone's JS engine and the login ----------
+
+
+def test_js_engine_and_login_reach_yt_dlp(tmp_path):
+    cookies = tmp_path / "youtube_cookies.txt"
+    cookies.write_text("# Netscape HTTP Cookie File\n")
+
+    options = bridge.base_options(
+        {"js": {"port": 5000, "token": "t"}, "cookies": str(cookies)}
+    )
+    assert bridge.phone_js.endpoint == (5000, "t")
+    assert options["cookiefile"] == str(cookies)
+
+    # Not signed in / no engine: nothing is passed
+    options = bridge.base_options({"cookies": str(tmp_path / "missing.txt")})
+    assert bridge.phone_js.endpoint is None
+    assert "cookiefile" not in options
+
+
+def test_phone_js_engine_is_offered_to_yt_dlp_only_when_running():
+    ydl = yt_dlp.YoutubeDL({"quiet": True})
+    ie = ydl.get_info_extractor("Youtube")
+    ie.initialize()
+    phone = ie._jsc_director.providers["Phone"]
+
+    bridge.phone_js.endpoint = None
+    assert not phone.is_available()
+    bridge.phone_js.endpoint = (5000, "t")
+    try:
+        assert phone.is_available()
+    finally:
+        bridge.phone_js.endpoint = None
+
+
+def test_bot_check_says_to_sign_in(api, monkeypatch):
+    def blocked(url, options):
+        raise yt_dlp.utils.DownloadError(
+            "ERROR: [youtube] abc: Sign in to confirm you’re not a bot. "
+            "Use --cookies-from-browser or --cookies for the authentication."
+        )
+
+    monkeypatch.setattr(bridge, "extract", blocked)
+    result = call(api, "/lookup", {"url": "https://youtu.be/abc"})
+    assert "Sign in to YouTube in Settings" in result["error"]

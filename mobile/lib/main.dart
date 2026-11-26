@@ -8,7 +8,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'screens/downloads.dart';
 import 'screens/home.dart';
 import 'screens/settings.dart';
+import 'services/account.dart';
 import 'services/downloads.dart';
+import 'services/js_engine.dart';
 import 'services/python_api.dart';
 import 'services/settings.dart';
 import 'services/share.dart';
@@ -21,11 +23,24 @@ Future<void> main() async {
   final settings = Settings(prefs);
   final downloads = Downloads(prefs)..wifiOnly = settings.wifiOnly;
   await downloads.start();
+  final account = await Account.load();
+
+  // Every request to Python carries the JavaScript engine and the login
+  PythonApi.extras = () async => {
+    'js': await JsEngine.instance.endpoint(),
+    if (account.signedIn) 'cookies': account.cookiesPath,
+  };
 
   // Start the download engine now, so the first link is quick
   unawaited(PythonApi.instance.then((_) {}, onError: (_) {}));
 
-  runApp(VideoDownloaderApp(settings: settings, downloads: downloads));
+  runApp(
+    VideoDownloaderApp(
+      settings: settings,
+      downloads: downloads,
+      account: account,
+    ),
+  );
 }
 
 class VideoDownloaderApp extends StatelessWidget {
@@ -33,10 +48,12 @@ class VideoDownloaderApp extends StatelessWidget {
     super.key,
     required this.settings,
     required this.downloads,
+    required this.account,
   });
 
   final Settings settings;
   final Downloads downloads;
+  final Account account;
 
   @override
   Widget build(BuildContext context) {
@@ -48,7 +65,11 @@ class VideoDownloaderApp extends StatelessWidget {
         theme: buildTheme(Brightness.light),
         darkTheme: buildTheme(Brightness.dark),
         themeMode: settings.themeMode,
-        home: AppShell(settings: settings, downloads: downloads),
+        home: AppShell(
+          settings: settings,
+          downloads: downloads,
+          account: account,
+        ),
       ),
     );
   }
@@ -56,9 +77,15 @@ class VideoDownloaderApp extends StatelessWidget {
 
 /// Home · Downloads · Settings (like the desktop app's sidebar)
 class AppShell extends StatefulWidget {
-  const AppShell({super.key, required this.settings, required this.downloads});
+  const AppShell({
+    super.key,
+    required this.settings,
+    required this.downloads,
+    required this.account,
+  });
 
   final Settings settings;
+  final Account account;
   final Downloads downloads;
 
   @override
@@ -105,7 +132,11 @@ class _AppShellState extends State<AppShell> {
         onGoToDownloads: () => _go(1),
       ),
       DownloadsScreen(downloads: widget.downloads, onGoHome: () => _go(0)),
-      SettingsScreen(settings: widget.settings, downloads: widget.downloads),
+      SettingsScreen(
+        settings: widget.settings,
+        downloads: widget.downloads,
+        account: widget.account,
+      ),
     ];
 
     return Scaffold(

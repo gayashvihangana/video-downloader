@@ -173,3 +173,90 @@ def test_sign_out_from_the_chip(app):
     assert app.sign_in_method == core.NO_SIGN_IN
     assert not shown(app.sign_in_chip)
     assert "cookiesfrombrowser" not in app.ydl_options()
+
+
+# ---------- a bad login must not break every link ----------
+
+
+class FakeYDL:
+    """Stands in for yt_dlp.YoutubeDL: fails while an account is used."""
+
+    calls = []
+
+    def __init__(self, options):
+        self.options = options
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def extract_info(self, url, download=False):
+        signed_in = "cookiesfrombrowser" in self.options
+        FakeYDL.calls.append(signed_in)
+        if signed_in:
+            raise RuntimeError(FakeYDL.signed_in_error)
+        return {"title": "ok"}
+
+
+@pytest.fixture
+def fake_ydl(monkeypatch):
+    import yt_dlp
+
+    FakeYDL.calls = []
+    FakeYDL.signed_in_error = "ERROR: [youtube] x: Requested format is not available"
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", FakeYDL)
+    return FakeYDL
+
+
+def test_signed_in_failure_retries_without_the_account(fake_ydl):
+    info = core.extract_info({"cookiesfrombrowser": ("firefox",)}, "u")
+    assert info == {"title": "ok"}
+    assert fake_ydl.calls == [True, False]
+
+
+def test_sign_in_errors_are_not_retried_without_the_account(fake_ydl):
+    fake_ydl.signed_in_error = "ERROR: [youtube] x: Private video. Sign in"
+    with pytest.raises(RuntimeError, match="Private video"):
+        core.extract_info({"cookiesfrombrowser": ("firefox",)}, "u")
+    assert fake_ydl.calls == [True]
+
+
+def test_without_an_account_there_is_one_attempt(fake_ydl, monkeypatch):
+    def broken(self, url, download=False):
+        fake_ydl.calls.append(False)
+        raise RuntimeError("Video unavailable")
+
+    monkeypatch.setattr(FakeYDL, "extract_info", broken)
+    with pytest.raises(RuntimeError):
+        core.extract_info({}, "u")
+    assert fake_ydl.calls == [False]
+
+
+def test_reset_app_signs_out_clears_caches_and_restores_settings(
+    app, tmp_path, monkeypatch
+):
+    cache = tmp_path / "cache" / "yt-dlp"
+    cache.mkdir(parents=True)
+    (cache / "player.json").write_text("{}")
+    monkeypatch.setattr(core, "download_cache_paths", lambda: [str(cache)])
+
+    folder = app.download_folder
+    app.sign_in_method = "Firefox"
+    app.update_sign_in_chip()
+    app.retry_menu.set("Don't retry")
+    app.photo_cache["x"] = ([], {})
+
+    app.reset_app()
+
+    assert app.sign_in_method == core.NO_SIGN_IN
+    assert not shown(app.sign_in_chip)
+    assert not cache.exists()
+    assert app.photo_cache == {}
+    assert app.retry_menu.get() == core.DEFAULT_RETRY
+    assert app.download_folder == folder
+    with open(core.SETTINGS_FILE, encoding="utf-8") as file:
+        saved = json.load(file)
+    assert saved["sign_in"] == core.NO_SIGN_IN
+    assert saved["folder"] == folder

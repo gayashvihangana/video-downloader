@@ -9,7 +9,7 @@ class Settings extends ChangeNotifier {
 
   ThemeMode get themeMode =>
       ThemeMode.values.asNameMap()[_prefs.getString('theme')] ??
-      ThemeMode.system;
+      ThemeMode.dark; // a media app: dark unless you pick otherwise
 
   set themeMode(ThemeMode mode) {
     _prefs.setString('theme', mode.name);
